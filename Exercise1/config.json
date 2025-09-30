@@ -1,0 +1,16 @@
+{
+  "videos": [
+    {
+      "name": "file_1",
+      "url": "https://pub-62e6c21968c74b69a4e8c9f417e5b681.r2.dev/file_1.mp4"
+    },
+    {
+      "name": "file_2",
+      "url": "https://pub-62e6c21968c74b69a4e8c9f417e5b681.r2.dev/file_2.mp4"
+    },
+    {
+      "name": "file_3",
+      "url": "https://pub-62e6c21968c74b69a4e8c9f417e5b681.r2.dev/file_3.mp4"
+    }
+  ]
+}
