@@ -4,12 +4,8 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="5b9a9186-82fb-4bea-a181-7e971681f07e" name="Changes" comment="Initial Commit">
-      <change afterPath="$PROJECT_DIR$/.idea/bigdataide_settings.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/Exercise1/config.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/Exercise1/video_access.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Exercise1/object_detection.py" beforeDir="false" afterPath="$PROJECT_DIR$/Exercise1/object_detection.py" afterDir="false" />
+    <list default="true" id="5b9a9186-82fb-4bea-a181-7e971681f07e" name="Changes" comment="Add video download functionality and training script for YOLO model">
+      <change afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -25,19 +21,20 @@
   </component>
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+    <option name="UPDATE_TYPE" value="REBASE" />
   </component>
-  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
-  "lastFilter": {
-    "state": "OPEN",
-    "assignee": "Kronjus"
+  <component name="GitHubPullRequestSearchHistory">{
+  &quot;lastFilter&quot;: {
+    &quot;state&quot;: &quot;OPEN&quot;,
+    &quot;assignee&quot;: &quot;Kronjus&quot;
   }
-}]]></component>
-  <component name="GithubPullRequestsUISettings"><![CDATA[{
-  "selectedUrlAndAccountId": {
-    "url": "https://github.com/Kronjus/TrafficEngineering.git",
-    "accountId": "cad4ba8b-545b-424b-981c-21601a664afd"
+}</component>
+  <component name="GithubPullRequestsUISettings">{
+  &quot;selectedUrlAndAccountId&quot;: {
+    &quot;url&quot;: &quot;https://github.com/Kronjus/TrafficEngineering.git&quot;,
+    &quot;accountId&quot;: &quot;cad4ba8b-545b-424b-981c-21601a664afd&quot;
   }
-}]]></component>
+}</component>
   <component name="ProjectColorInfo">{
   &quot;associatedIndex&quot;: 7
 }</component>
@@ -49,6 +46,9 @@
   <component name="PropertiesComponent"><![CDATA[{
   "keyToString": {
     "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "Python.test.executor": "Run",
+    "Python.training.executor": "Run",
+    "Python.video_download.executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
     "RunOnceActivity.git.unshallow": "true",
@@ -60,7 +60,7 @@
     "node.js.selected.package.eslint": "(autodetect)",
     "node.js.selected.package.tslint": "(autodetect)",
     "nodejs_package_manager_path": "npm",
-    "settings.editor.selected.configurable": "editor.preferences.inline.completion",
+    "settings.editor.selected.configurable": "com.github.copilot.settings.chat.ChatConfigurable",
     "vue.rearranger.settings.migration": "true"
   }
 }]]></component>
@@ -68,23 +68,6 @@
     <key name="MoveFile.RECENT_KEYS">
       <recent name="C:\Users\Julian\PycharmProjects\TrafficEngineering\Exercise1" />
     </key>
-  </component>
-  <component name="RunManager">
-    <configuration default="true" type="ShConfigurationType">
-      <option name="SCRIPT_TEXT" value="" />
-      <option name="INDEPENDENT_SCRIPT_PATH" value="true" />
-      <option name="SCRIPT_PATH" value="" />
-      <option name="SCRIPT_OPTIONS" value="" />
-      <option name="INDEPENDENT_SCRIPT_WORKING_DIRECTORY" value="true" />
-      <option name="SCRIPT_WORKING_DIRECTORY" value="$PROJECT_DIR$" />
-      <option name="INDEPENDENT_INTERPRETER_PATH" value="true" />
-      <option name="INTERPRETER_PATH" value="powershell.exe" />
-      <option name="INTERPRETER_OPTIONS" value="" />
-      <option name="EXECUTE_IN_TERMINAL" value="true" />
-      <option name="EXECUTE_SCRIPT_FILE" value="true" />
-      <envs />
-      <method v="2" />
-    </configuration>
   </component>
   <component name="SharedIndexes">
     <attachedChunks>
@@ -102,7 +85,7 @@
       <option name="presentableId" value="Default" />
       <updated>1759233286058</updated>
       <workItem from="1759233287114" duration="171000" />
-      <workItem from="1759233506183" duration="3329000" />
+      <workItem from="1759233506183" duration="3856000" />
     </task>
     <task id="LOCAL-00001" summary="Initial Commit">
       <option name="closed" value="true" />
@@ -112,7 +95,23 @@
       <option name="project" value="LOCAL" />
       <updated>1759234390878</updated>
     </task>
-    <option name="localTasksCounter" value="2" />
+    <task id="LOCAL-00002" summary="Add initial project configuration and video download functionality">
+      <option name="closed" value="true" />
+      <created>1759238284683</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1759238284683</updated>
+    </task>
+    <task id="LOCAL-00003" summary="Add video download functionality and training script for YOLO model">
+      <option name="closed" value="true" />
+      <created>1759387591449</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1759387591449</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -131,6 +130,13 @@
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="Initial Commit" />
-    <option name="LAST_COMMIT_MESSAGE" value="Initial Commit" />
+    <MESSAGE value="Add initial project configuration and video download functionality" />
+    <MESSAGE value="Add video download functionality and training script for YOLO model" />
+    <option name="LAST_COMMIT_MESSAGE" value="Add video download functionality and training script for YOLO model" />
+  </component>
+  <component name="com.intellij.coverage.CoverageDataManagerImpl">
+    <SUITE FILE_PATH="coverage/TrafficEngineering$test.coverage" NAME="test Coverage Results" MODIFIED="1759334170786" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/TrafficEngineering$video_download.coverage" NAME="video_download Coverage Results" MODIFIED="1759386342080" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/Exercise1" />
+    <SUITE FILE_PATH="coverage/TrafficEngineering$training.coverage" NAME="training Coverage Results" MODIFIED="1759387645547" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/Exercise1" />
   </component>
 </project>
