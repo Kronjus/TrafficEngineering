@@ -4,10 +4,12 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="5b9a9186-82fb-4bea-a181-7e971681f07e" name="Changes" comment="Add video download functionality and training script for YOLO model">
-      <change afterPath="$PROJECT_DIR$/.github/prompts/create-readme.prompt.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+    <list default="true" id="5b9a9186-82fb-4bea-a181-7e971681f07e" name="Changes" comment="Enhance training script and add configuration files for YOLO model tracking">
+      <change afterPath="$PROJECT_DIR$/.idea/csv-editor.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/Exercise1/botsort.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/Exercise1/bytetrack.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Exercise1/training.py" beforeDir="false" afterPath="$PROJECT_DIR$/Exercise1/training.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -24,7 +26,6 @@
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
     <option name="RESET_MODE" value="HARD" />
-    <option name="UPDATE_TYPE" value="REBASE" />
   </component>
   <component name="GitHubPullRequestSearchHistory">{
   &quot;lastFilter&quot;: {
@@ -58,16 +59,20 @@
     "SHARE_PROJECT_CONFIGURATION_FILES": "true",
     "git-widget-placeholder": "master",
     "ignore.virus.scanning.warn.message": "true",
+    "last_opened_file_path": "C:/Users/jj/PycharmProjects/TrafficEngineering/Exercise1",
     "node.js.detected.package.eslint": "true",
     "node.js.detected.package.tslint": "true",
     "node.js.selected.package.eslint": "(autodetect)",
     "node.js.selected.package.tslint": "(autodetect)",
     "nodejs_package_manager_path": "npm",
-    "settings.editor.selected.configurable": "com.github.copilot.settings.customInstructions.CopilotInstructionsConfigurable",
+    "settings.editor.selected.configurable": "preferences.pluginManager",
     "vue.rearranger.settings.migration": "true"
   }
 }]]></component>
   <component name="RecentsManager">
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="C:\Users\jj\PycharmProjects\TrafficEngineering\Exercise1" />
+    </key>
     <key name="MoveFile.RECENT_KEYS">
       <recent name="C:\Users\Julian\PycharmProjects\TrafficEngineering\Exercise1" />
     </key>
@@ -144,7 +149,15 @@
       <option name="project" value="LOCAL" />
       <updated>1759387591449</updated>
     </task>
-    <option name="localTasksCounter" value="4" />
+    <task id="LOCAL-00004" summary="Trained the model on the VisDrone dataset with my big boy GPU.">
+      <option name="closed" value="true" />
+      <created>1759435399112</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1759435399112</updated>
+    </task>
+    <option name="localTasksCounter" value="5" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -165,10 +178,12 @@
     <MESSAGE value="Initial Commit" />
     <MESSAGE value="Add initial project configuration and video download functionality" />
     <MESSAGE value="Add video download functionality and training script for YOLO model" />
-    <option name="LAST_COMMIT_MESSAGE" value="Add video download functionality and training script for YOLO model" />
+    <MESSAGE value="Trained the model on the VisDrone dataset with my big boy GPU." />
+    <MESSAGE value="Enhance training script and add configuration files for YOLO model tracking" />
+    <option name="LAST_COMMIT_MESSAGE" value="Enhance training script and add configuration files for YOLO model tracking" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
-    <SUITE FILE_PATH="coverage/TrafficEngineering$training.coverage" NAME="training Coverage Results" MODIFIED="1759426744488" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/Exercise1" />
+    <SUITE FILE_PATH="coverage/TrafficEngineering$training.coverage" NAME="training Coverage Results" MODIFIED="1759512692671" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/Exercise1" />
     <SUITE FILE_PATH="coverage/TrafficEngineering$video_download.coverage" NAME="video_download Coverage Results" MODIFIED="1759386342080" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/Exercise1" />
     <SUITE FILE_PATH="coverage/TrafficEngineering$test.coverage" NAME="test Coverage Results" MODIFIED="1759334170786" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
   </component>
