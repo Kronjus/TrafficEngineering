@@ -5,11 +5,10 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="5b9a9186-82fb-4bea-a181-7e971681f07e" name="Changes" comment="Enhance training script and add configuration files for YOLO model tracking">
-      <change afterPath="$PROJECT_DIR$/.idea/csv-editor.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/Exercise1/botsort.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/Exercise1/bytetrack.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Exercise1/training.py" beforeDir="false" afterPath="$PROJECT_DIR$/Exercise1/training.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Exercise1/data/footage/DJI_20251006180546_0001_D.MP4" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Exercise1/data/footage/DJI_20251006183040_0002_D.MP4" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -36,7 +35,7 @@
   <component name="GithubPullRequestsUISettings">{
   &quot;selectedUrlAndAccountId&quot;: {
     &quot;url&quot;: &quot;https://github.com/Kronjus/TrafficEngineering.git&quot;,
-    &quot;accountId&quot;: &quot;cad4ba8b-545b-424b-981c-21601a664afd&quot;
+    &quot;accountId&quot;: &quot;07ba1ec3-30d7-4b47-b03c-7c5f88f62137&quot;
   }
 }</component>
   <component name="ProjectColorInfo">{
@@ -47,28 +46,28 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "Python.test.executor": "Run",
-    "Python.training.executor": "Run",
-    "Python.video_download.executor": "Run",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "SHARE_PROJECT_CONFIGURATION_FILES": "true",
-    "git-widget-placeholder": "master",
-    "ignore.virus.scanning.warn.message": "true",
-    "last_opened_file_path": "C:/Users/jj/PycharmProjects/TrafficEngineering/Exercise1",
-    "node.js.detected.package.eslint": "true",
-    "node.js.detected.package.tslint": "true",
-    "node.js.selected.package.eslint": "(autodetect)",
-    "node.js.selected.package.tslint": "(autodetect)",
-    "nodejs_package_manager_path": "npm",
-    "settings.editor.selected.configurable": "preferences.pluginManager",
-    "vue.rearranger.settings.migration": "true"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;Python.test.executor&quot;: &quot;Run&quot;,
+    &quot;Python.training.executor&quot;: &quot;Run&quot;,
+    &quot;Python.video_download.executor&quot;: &quot;Run&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
+    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
+    &quot;last_opened_file_path&quot;: &quot;C:/Users/jj/PycharmProjects/TrafficEngineering/Exercise1&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.pluginManager&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
-}]]></component>
+}</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="C:\Users\jj\PycharmProjects\TrafficEngineering\Exercise1" />
@@ -110,8 +109,8 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-js-predefined-d6986cc7102b-b598e85cdad2-JavaScript-PY-252.25557.178" />
-        <option value="bundled-python-sdk-ce6832f46686-7b97d883f26b-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.25557.178" />
+        <option value="bundled-js-predefined-d6986cc7102b-3aa1da707db6-JavaScript-PY-252.26830.99" />
+        <option value="bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99" />
       </set>
     </attachedChunks>
   </component>
@@ -124,6 +123,8 @@
       <updated>1759233286058</updated>
       <workItem from="1759233287114" duration="171000" />
       <workItem from="1759233506183" duration="3856000" />
+      <workItem from="1759653091736" duration="11000" />
+      <workItem from="1759781353787" duration="516000" />
     </task>
     <task id="LOCAL-00001" summary="Initial Commit">
       <option name="closed" value="true" />
@@ -157,7 +158,23 @@
       <option name="project" value="LOCAL" />
       <updated>1759435399112</updated>
     </task>
-    <option name="localTasksCounter" value="5" />
+    <task id="LOCAL-00005" summary="Enhance training script and add configuration files for YOLO model tracking">
+      <option name="closed" value="true" />
+      <created>1759513385474</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1759513385474</updated>
+    </task>
+    <task id="LOCAL-00006" summary="Add .gitattributes for LFS support and update workspace configuration">
+      <option name="closed" value="true" />
+      <created>1759781620000</created>
+      <option name="number" value="00006" />
+      <option name="presentableId" value="LOCAL-00006" />
+      <option name="project" value="LOCAL" />
+      <updated>1759781620000</updated>
+    </task>
+    <option name="localTasksCounter" value="7" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">

@@ -424,3 +424,4 @@ codegen/
 octave-workspace
 
 /Exercise1/datasets/
+/Exercise1/data/footage/*.MP4
