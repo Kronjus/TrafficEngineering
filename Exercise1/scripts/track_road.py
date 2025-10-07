@@ -15,7 +15,7 @@ tracker = sv.ByteTrack()
 box_annotator = sv.BoxAnnotator()
 zone = sv.PolygonZone(roi_points_list)
 label_annotator = sv.LabelAnnotator()
-trace_annotator = sv.TraceAnnotator()
+trace_annotator = sv.TraceAnnotator(trace_length=600)
 
 
 def callback(frame: np.ndarray, _: int) -> np.ndarray:
@@ -25,7 +25,8 @@ def callback(frame: np.ndarray, _: int) -> np.ndarray:
     mask = zone.trigger(detections=detections)
     detections = detections[mask & np.isin(detections.class_id, [3, 4, 5])]
     labels = [
-        f"#{tracker_id} {class_name}" for class_name, tracker_id in zip(detections.data['class_name'], detections.tracker_id)
+        f"#{tracker_id} {class_name}" for class_name, tracker_id in
+        zip(detections.data['class_name'], detections.tracker_id)
     ]
     annotated_frame = box_annotator.annotate(frame.copy(), detections=detections)
     annotated_frame = label_annotator.annotate(annotated_frame, detections=detections, labels=labels)
