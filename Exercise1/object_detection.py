@@ -1,55 +1,42 @@
-from ultralytics import YOLO
-from collections import defaultdict
+import json
+
 import cv2
-import numpy as np
+from ultralytics import solutions
 
-model = YOLO("data/model.pt")
+video_path = 'data/footage/DJI_20251006180546_0001_D.MP4'
+roi_file = 'roi_coordinates.json'
 
-video_path = "data/footage/DJI_20251006180546_0001_D.MP4"
+with open(roi_file, "r") as f:
+    loaded = json.load(f)
+roi_points_list = [tuple(x) for x in loaded]
+
 cap = cv2.VideoCapture(video_path)
+assert cap.isOpened(), "Error reading video file"
 
-track_history = defaultdict(lambda: [])
+w, h, fps = (int(cap.get(x)) for x in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT, cv2.CAP_PROP_FPS))
+video_writer = cv2.VideoWriter("data/results/trackzone_output.avi", cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
 
-
-# Loop through the video frames
+trackzone = solutions.TrackZone(
+    show=False,
+    region=roi_points_list,
+    model="data/model.pt",
+    verbose=True,
+    classes=['car', 'truck', 'van'],
+    device=0,
+)
+n = 0
 while cap.isOpened():
-    # Read a frame from the video
-    success, frame = cap.read()
-
-    if success:
-        # Run YOLO11 tracking on the frame, persisting tracks between frames
-        result = model.track(frame, persist=True)[0]
-
-        # Get the boxes and track IDs
-        if result.boxes and result.boxes.is_track:
-            boxes = result.boxes.xywh.cpu()
-            track_ids = result.boxes.id.int().cpu().tolist()
-
-            # Visualize the result on the frame
-            frame = result.plot()
-
-            # Plot the tracks
-            for box, track_id in zip(boxes, track_ids):
-                x, y, w, h = box
-                track = track_history[track_id]
-                track.append((float(x), float(y)))  # x, y center point
-                if len(track) > 30:  # retain 30 tracks for 30 frames
-                    track.pop(0)
-
-                # Draw the tracking lines
-                points = np.hstack(track).astype(np.int32).reshape((-1, 1, 2))
-                cv2.polylines(frame, [points], isClosed=False, color=(230, 230, 230), thickness=10)
-
-        # Display the annotated frame
-        cv2.imshow("YOLO11 Tracking", frame)
-
-        # Break the loop if 'q' is pressed
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
-    else:
-        # Break the loop if the end of the video is reached
+    success, im0 = cap.read()
+    if not success:
+        print("Video frame is empty or processing is complete.")
         break
 
-# Release the video capture object and close the display window
+    results = trackzone(im0)
+    video_writer.write(results.plot_im)
+    if n % 25 == 0:
+        print(results.total_tracks)
+    n += 1
+
 cap.release()
+video_writer.release()
 cv2.destroyAllWindows()
