@@ -7,10 +7,9 @@ from ultralytics import solutions
 
 # --- Configuration ---
 MODEL_PATH = '../data/model.pt'
-VIDEO_PATH = '../data/footage/DJI_20251006180546_0001_D.MP4'
+VIDEO_PATH = '../data/footage/DJI_20251006183040_0002_D.MP4'
 ROI_PATH = '../data/roi_coordinates.json'
-OUTPUT_VIDEO_PATH = '../outputs/region_counting.avi'
-OUTPUT_CSV_PATH = '../outputs/counts_per_frame.csv'
+OUTPUT_CSV_PATH = '../outputs/counts_per_frame_video_2.csv'
 TARGET_FPS = 15
 
 # --- Load ROI Coordinates ---
@@ -36,6 +35,7 @@ if fps > TARGET_FPS:
 else:
     frame_skip = 1
 print(f"Original FPS: {fps}. Target FPS: {TARGET_FPS}. Processing 1 of every {frame_skip} frames.")
+
 
 # --- Initialize Region Counter ---
 regioncounter = solutions.RegionCounter(
@@ -75,7 +75,6 @@ with tqdm(total=total_frames, desc="Processing Video Frames") as pbar:
         pbar.update(1)
 
 # --- Cleanup ---
-print(f"\nProcessing complete. Output video saved to {OUTPUT_VIDEO_PATH}")
 print(f"Frame-by-frame counts saved to {OUTPUT_CSV_PATH}")
 cap.release()
 cv2.destroyAllWindows()
