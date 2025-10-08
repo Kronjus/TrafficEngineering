@@ -425,3 +425,6 @@ octave-workspace
 
 /Exercise1/datasets/
 /Exercise1/data/footage/*.MP4
+/.idea/
+/Exercise1/outputs/*.avi
+/Exercise1/outputs/*.mp4

@@ -1,0 +1,32 @@
+# This CITATION.cff file was generated with cffinit.
+# Visit https://bit.ly/cffinit to generate yours today!
+
+cff-version: 1.2.0
+title: Traffic Eningeering Exercises
+message: >-
+  If you use this dataset, please cite it using the metadata
+  from this file.
+type: dataset
+authors:
+  - given-names: Julian Andreas
+    family-names: Jansen
+    email: jujansen@student.ethz.ch
+    affiliation: ETH Zürich
+    orcid: 'https://orcid.org/0009-0000-4275-0895'
+  - given-names: Alina
+    family-names: Akopian
+    email: aakopian@student.ethz.ch
+    affiliation: ETH Zürich
+repository-code: 'https://github.com/Kronjus/TrafficEngineering'
+abstract: >-
+  Work created while working through the obligatory
+  exercises handed out at ETH Zürich's Traffic Engineering
+  Lecture (101-0437-00L).
+keywords:
+  - Traffic
+  - Engineering
+  - Machine Learning
+  - Traffic Engineering
+  - Data Science
+  - ETH Zürich
+license: MIT
