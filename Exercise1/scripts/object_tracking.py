@@ -1,81 +1,84 @@
-import csv
+"""
+Object Tracking Script
+
+This script processes a video file to perform object tracking using a YOLO model. It detects objects within a
+specified region of interest (ROI) and exports the tracking data to a CSV file. The script uses a target frame
+rate to control the frequency of detection.
+
+Modules:
+    - json: For loading ROI coordinates from a JSON file.
+    - cv2: OpenCV library for video processing.
+    - numpy: For handling numerical operations and arrays.
+    - supervision: For object tracking and detection utilities.
+    - tqdm: For displaying a progress bar during video processing.
+    - ultralytics: For loading and using the YOLO model.
+
+Configuration:
+    - MODEL_PATH: Path to the YOLO model file.
+    - VIDEO_PATH: Path to the input video file.
+    - ROI_PATH: Path to the JSON file containing ROI coordinates.
+    - OUTPUT_CSV_PATH: Path to the output CSV file for tracking data.
+    - TARGET_FPS: Target frames per second for processing.
+
+Usage:
+    Ensure the required files (model, video, ROI JSON) are in the specified paths. Run the script to process the video
+    and generate a CSV file with tracking data.
+"""
+
 import json
 
 import cv2
+import numpy as np
+import supervision as sv
 from tqdm import tqdm
-from ultralytics import solutions
+from ultralytics import YOLO
 
 # --- Configuration ---
-MODEL_PATH = '../data/model.pt'
-VIDEO_PATH = '../data/footage/DJI_20251006180546_0001_D.MP4'
-ROI_PATH = '../data/roi_coordinates.json'
-OUTPUT_CSV_PATH = '../outputs/tracks_per_frame.csv'
-TARGET_FPS = 15
+MODEL_PATH = '../data/model.pt'  # Path to the YOLO model file
+VIDEO_PATH = '../data/footage/DJI_20251006180546_0001_D.MP4'  # Path to the input video file
+ROI_PATH = '../data/roi_coordinates.json'  # Path to the JSON file containing ROI coordinates
+OUTPUT_CSV_PATH = '../outputs/tracks_per_frame.csv'  # Path to the output CSV file
+TARGET_FPS = 15  # Target frames per second for processing
 
 # --- Load ROI Coordinates ---
 try:
     with open(ROI_PATH, 'r') as f:
-        load = json.load(f)
-    roi_points = [tuple(x) for x in load]
+        load = json.load(f)  # Load ROI coordinates from the JSON file
+    roi_points = np.array([tuple(x) for x in load])  # Convert ROI points to a NumPy array
 except FileNotFoundError:
-    print(f"Error: ROI file not found at {ROI_PATH}")
+    print(f"Error: ROI file not found at {ROI_PATH}")  # Handle missing ROI file
     exit()
 
-# --- Initialize Video Capture ---
-cap = cv2.VideoCapture(VIDEO_PATH)
-assert cap.isOpened(), f"Error reading video file at {VIDEO_PATH}"
+# --- Get Video Info ---
+cap = cv2.VideoCapture(VIDEO_PATH)  # Open the video file
+total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))  # Get the total number of frames in the video
+original_fps = cap.get(cv2.CAP_PROP_FPS)  # Get the original FPS of the video
+frame_interval = int(original_fps // TARGET_FPS)  # Calculate the frame interval for target FPS
+frame_idx = 0  # Initialize the frame index
 
-# --- Get Video Properties ---
-w, h, fps = (int(cap.get(x)) for x in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT, cv2.CAP_PROP_FPS))
-total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+# --- Load Model ---
+model = YOLO(MODEL_PATH)  # Load the YOLO model
+tracker = sv.ByteTrack()  # Initialize the ByteTrack tracker
+smoother = sv.DetectionsSmoother()  # Initialize the detections smoother
+csv_sink = sv.CSVSink(OUTPUT_CSV_PATH)  # Initialize the CSV sink for writing tracking data
+frames_generator = sv.get_video_frames_generator(VIDEO_PATH)  # Create a generator for video frames
 
-# --- Calculate frame skip interval for downsampling ---
-if fps > TARGET_FPS:
-    frame_skip = round(fps / TARGET_FPS)
-else:
-    frame_skip = 1
-print(f"Original FPS: {fps}. Target FPS: {TARGET_FPS}. Processing 1 of every {frame_skip} frames.")
+zone = sv.PolygonZone(roi_points)  # Define the ROI as a polygon zone
 
-
-# --- Initialize Region Counter ---
-trackzone = solutions.TrackZone(
-    show=False,
-    region=roi_points,
-    model=MODEL_PATH,
-    conf=0.67,
-    verbose=False
-)
-
-## --- Create CSV and write the header ONCE ---
-#with open(OUTPUT_CSV_PATH, 'w', newline='') as f:
-#    writer = csv.writer(f)
-#    writer.writerow(['Frame', 'Vehicles'])
-
-# --- Process video and append to CSV in a loop ---
-with tqdm(total=total_frames, desc="Processing Video Frames") as pbar:
-    frame_count = 0
-    while cap.isOpened():
-        success, im0 = cap.read()
-
-        if not success:
-            print("\nVideo frame is empty or processing is complete.")
-            break
-
-        if frame_count % frame_skip == 0:
-            # Process frame with the counter
-            results = trackzone(im0)
-
-            ## Append the count for the current frame to the CSV
-            #with open(OUTPUT_CSV_PATH, 'a', newline='') as csvfile:
-            #    writer = csv.writer(csvfile)
-            #    vehicle_count = results.region_counts.get('Region#01', 0)
-            #    writer.writerow([frame_count, vehicle_count])
-        print(results)
-        frame_count += 1
-        pbar.update(1)
-        break
+# --- Process Video Frames ---
+with csv_sink as sink:  # Open the CSV sink for writing
+    with tqdm(total=total_frames, desc="Processing Video Frames") as pbar:  # Initialize progress bar
+        for frame in frames_generator:  # Iterate over video frames
+            if frame_idx % frame_interval == 0:  # Process only frames at the specified interval
+                results = model(frame, verbose=False)[0]  # Perform object detection on the frame
+                detections = sv.Detections.from_ultralytics(results)  # Convert YOLO results to detections
+                mask = zone.trigger(detections=detections)  # Check if detections are within the ROI
+                detections = detections[mask & np.isin(detections.class_id, [3, 4, 5])]  # Filter detections by class ID
+                detections = tracker.update_with_detections(detections)  # Update tracker with filtered detections
+                detections = smoother.update_with_detections(detections)  # Smooth the detections
+                sink.append(detections, custom_data={'frame': frame_idx})  # Write detections to the CSV file
+            frame_idx += 1  # Increment the frame index
+            pbar.update(1)  # Update the progress bar
 
 # --- Cleanup ---
-print(f"Frame-by-frame counts saved to {OUTPUT_CSV_PATH}")
-cap.release()
-cv2.destroyAllWindows()
+cap.release()  # Release the video capture object
