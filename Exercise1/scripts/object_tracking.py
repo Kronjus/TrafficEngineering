@@ -37,7 +37,7 @@ from ultralytics import YOLO
 MODEL_PATH = '../data/model.pt'  # Path to the YOLO model file
 VIDEO_PATH = '../data/footage/DJI_20251006180546_0001_D.MP4'  # Path to the input video file
 ROI_PATH = '../data/roi_coordinates.json'  # Path to the JSON file containing ROI coordinates
-OUTPUT_CSV_PATH = '../outputs/tracks_per_frame.csv'  # Path to the output CSV file
+OUTPUT_CSV_PATH = '../outputs/tracks_per_frame_video_1.csv'  # Path to the output CSV file
 TARGET_FPS = 15  # Target frames per second for processing
 
 # --- Load ROI Coordinates ---
