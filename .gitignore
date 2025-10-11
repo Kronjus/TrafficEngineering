@@ -428,3 +428,4 @@ octave-workspace
 /.idea/
 /Exercise1/outputs/*.avi
 /Exercise1/outputs/*.mp4
+/opencv/
