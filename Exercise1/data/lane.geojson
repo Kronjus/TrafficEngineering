@@ -1,0 +1,135 @@
+{
+  "type": "FeatureCollection",
+  "generator": "overpass-turbo",
+  "copyright": "The data included in this document is from www.openstreetmap.org. The data is made available under ODbL.",
+  "timestamp": "2025-10-14T19:20:44Z",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "@id": "way/68480129",
+        "check_date:cycleway": "2023-10-11",
+        "cycleway:right": "lane",
+        "cycleway:right:lane": "advisory",
+        "foot": "use_sidepath",
+        "highway": "tertiary",
+        "lane_markings": "no",
+        "lcn": "yes",
+        "lit": "yes",
+        "maxspeed": "50",
+        "name": "Badenerstrasse",
+        "oneway": "yes",
+        "sidewalk:left": "no",
+        "sidewalk:right": "separate",
+        "surface": "asphalt",
+        "wikidata": "Q27331537"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            8.5038626,
+            47.3809891
+          ],
+          [
+            8.5039243,
+            47.3809684
+          ],
+          [
+            8.5039488,
+            47.3809633
+          ],
+          [
+            8.5041112,
+            47.3809489
+          ],
+          [
+            8.504159,
+            47.3809434
+          ],
+          [
+            8.5041878,
+            47.3809381
+          ],
+          [
+            8.5042473,
+            47.3809216
+          ],
+          [
+            8.504951,
+            47.3806121
+          ],
+          [
+            8.5054223,
+            47.3804039
+          ],
+          [
+            8.5060608,
+            47.3801218
+          ],
+          [
+            8.5066737,
+            47.3798519
+          ],
+          [
+            8.5067016,
+            47.3798347
+          ],
+          [
+            8.5068242,
+            47.3797728
+          ],
+          [
+            8.5070304,
+            47.3796986
+          ],
+          [
+            8.5081196,
+            47.3792024
+          ],
+          [
+            8.5085135,
+            47.3790205
+          ],
+          [
+            8.508665,
+            47.3789367
+          ],
+          [
+            8.5087175,
+            47.3789129
+          ],
+          [
+            8.5087749,
+            47.3788868
+          ],
+          [
+            8.5088976,
+            47.3788485
+          ],
+          [
+            8.5095708,
+            47.3785436
+          ],
+          [
+            8.509636,
+            47.3785021
+          ],
+          [
+            8.5097634,
+            47.3784007
+          ],
+          [
+            8.5098302,
+            47.3783422
+          ],
+          [
+            8.5098726,
+            47.3783051
+          ]
+        ]
+      },
+      "id": "way/68480129"
+    }
+  ]
+}
