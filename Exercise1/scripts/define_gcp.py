@@ -2,7 +2,7 @@ import json
 
 import cv2
 
-VIDEO_PATH = '../data/footage/DJI_20251008182729_0004_D.MP4'
+VIDEO_PATH = '../data/footage/DJI_20251006180546_0001_D.MP4'
 points = []
 
 # Globals for coordinate mapping and interaction
