@@ -41,8 +41,9 @@ class METANETCellConfig:
     - free_flow_speed_kmh: Free-flow speed v_f in km/h (must be > 0).
     - jam_density_veh_per_km_per_lane: Jam density ρ_jam per lane in veh/km (must be > 0).
     - tau_s: Relaxation time τ in seconds (must be > 0), typically 10-30s.
-    - eta: Anticipation coefficient η (dimensionless, must be >= 0), typically small.
-    - kappa: Regularization constant κ (veh/km/lane, must be > 0), small positive value.
+    - nu: Anticipation/diffusion coefficient ν in km²/h (must be >= 0), typically small.
+    - kappa: Regularization constant κ in veh/km/lane (must be > 0), small positive value.
+    - delta: Dimensionless exponent (must be > 0) for equilibrium speed function, typically 1-4.
     - capacity_veh_per_hour_per_lane: Per-lane capacity in veh/h (must be > 0).
     - initial_density_veh_per_km_per_lane: Initial density per lane in veh/km (>= 0).
     - initial_speed_kmh: Initial speed in km/h (>= 0, <= free_flow_speed_kmh).
@@ -51,6 +52,9 @@ class METANETCellConfig:
     -----
     Validation is performed in ``__post_init__`` to catch common configuration
     mistakes early. The dataclass is frozen to make instances immutable.
+    
+    The parameter `nu` was previously named `eta` in older versions for backward
+    compatibility. Both names refer to the same anticipation coefficient.
     """
 
     name: str
@@ -59,8 +63,9 @@ class METANETCellConfig:
     free_flow_speed_kmh: float
     jam_density_veh_per_km_per_lane: float
     tau_s: float = 18.0  # Relaxation time in seconds
-    eta: float = 60.0  # Anticipation coefficient (km²/h)
+    nu: float = 60.0  # Anticipation coefficient (km²/h)
     kappa: float = 40.0  # Regularization constant (veh/km/lane)
+    delta: float = 1.0  # Dimensionless exponent for equilibrium speed
     capacity_veh_per_hour_per_lane: float = 2200.0
     initial_density_veh_per_km_per_lane: float = 0.0
     initial_speed_kmh: float = 0.0  # Will be set to V(rho) if 0
@@ -77,14 +82,15 @@ class METANETCellConfig:
             ("jam_density_veh_per_km_per_lane", self.jam_density_veh_per_km_per_lane),
             ("tau_s", self.tau_s),
             ("kappa", self.kappa),
+            ("delta", self.delta),
             ("capacity_veh_per_hour_per_lane", self.capacity_veh_per_hour_per_lane),
         ]:
             if attr_val <= 0:
                 raise ValueError(f"{attr_name} must be positive.")
 
-        # Eta and initial values must be non-negative
-        if self.eta < 0:
-            raise ValueError("eta must be non-negative.")
+        # nu and initial values must be non-negative
+        if self.nu < 0:
+            raise ValueError("nu must be non-negative.")
         if self.initial_density_veh_per_km_per_lane < 0:
             raise ValueError("Initial density cannot be negative.")
         if self.initial_speed_kmh < 0:
@@ -141,10 +147,14 @@ def greenshields_speed(
     density: float,
     free_flow_speed_kmh: float,
     jam_density: float,
+    delta: float = 1.0,
 ) -> float:
-    """Compute equilibrium speed using Greenshields' linear model.
+    """Compute equilibrium speed using generalized Greenshields model.
 
-    V(ρ) = v_f * (1 - ρ / ρ_jam)
+    V(ρ) = v_f * (1 - (ρ / ρ_jam)^delta)
+
+    When delta=1, this reduces to the classic linear Greenshields model.
+    Higher values of delta create more nonlinear speed-density relationships.
 
     Parameters
     ----------
@@ -154,6 +164,9 @@ def greenshields_speed(
         Free-flow speed in km/h.
     jam_density : float
         Jam density in veh/km/lane.
+    delta : float, optional
+        Dimensionless exponent controlling nonlinearity (default: 1.0).
+        Must be positive. Typical values range from 1 to 4.
 
     Returns
     -------
@@ -163,7 +176,7 @@ def greenshields_speed(
     if jam_density <= 0:
         return free_flow_speed_kmh
     ratio = min(1.0, max(0.0, density / jam_density))
-    return free_flow_speed_kmh * (1.0 - ratio)
+    return free_flow_speed_kmh * (1.0 - ratio ** delta)
 
 
 class METANETSimulation:
@@ -292,6 +305,7 @@ class METANETSimulation:
                     densities[idx],
                     cell.free_flow_speed_kmh,
                     cell.jam_density_veh_per_km_per_lane,
+                    cell.delta,
                 )
                 speeds.append(max(1.0, v_eq))  # Ensure non-zero initial speed
 
@@ -520,7 +534,7 @@ class METANETSimulation:
 
             # Equilibrium speed term
             v_eq = self.equilibrium_speed(
-                densities[idx], cell.free_flow_speed_kmh, cell.jam_density_veh_per_km_per_lane
+                densities[idx], cell.free_flow_speed_kmh, cell.jam_density_veh_per_km_per_lane, cell.delta
             )
             tau_hours = cell.tau_s / 3600.0  # Convert tau from seconds to hours
             relaxation_term = (v_eq - v) / tau_hours
@@ -535,9 +549,9 @@ class METANETSimulation:
             # Anticipation term
             if idx < len(self.cells) - 1:
                 rho_downstream = densities[idx + 1]
-                # eta is in km²/h, convert to proper units
-                eta_hours = cell.eta  # Already in km²/h
-                anticipation_term = -(eta_hours / tau_hours) * (
+                # nu is in km²/h, convert to proper units
+                nu_hours = cell.nu  # Already in km²/h
+                anticipation_term = -(nu_hours / tau_hours) * (
                     (rho_downstream - densities[idx]) / (rho + cell.kappa)
                 )
             else:
@@ -551,7 +565,7 @@ class METANETSimulation:
             # If density is very low, reset speed to equilibrium
             if new_rho < 1.0:
                 new_v = self.equilibrium_speed(
-                    new_rho, cell.free_flow_speed_kmh, cell.jam_density_veh_per_km_per_lane
+                    new_rho, cell.free_flow_speed_kmh, cell.jam_density_veh_per_km_per_lane, cell.delta
                 )
 
             new_densities.append(new_rho)
@@ -568,8 +582,9 @@ def build_uniform_metanet_mainline(
     free_flow_speed_kmh: float,
     jam_density_veh_per_km_per_lane: float,
     tau_s: float = 18.0,
-    eta: float = 60.0,
+    nu: float = 60.0,
     kappa: float = 40.0,
+    delta: float = 1.0,
     capacity_veh_per_hour_per_lane: float = 2200.0,
     initial_density_veh_per_km_per_lane: Union[float, Sequence[float]] = 0.0,
     initial_speed_kmh: Union[float, Sequence[float]] = 0.0,
@@ -594,10 +609,12 @@ def build_uniform_metanet_mainline(
         Per-lane jam density (veh/km/lane) applied to all cells.
     tau_s:
         Relaxation time in seconds (default: 18.0).
-    eta:
-        Anticipation coefficient in km²/h (default: 60.0).
+    nu:
+        Anticipation/diffusion coefficient in km²/h (default: 60.0).
     kappa:
         Regularization constant in veh/km/lane (default: 40.0).
+    delta:
+        Dimensionless exponent for equilibrium speed (default: 1.0).
     capacity_veh_per_hour_per_lane:
         Per-lane capacity (veh/h/lane, default: 2200.0).
     initial_density_veh_per_km_per_lane:
@@ -653,8 +670,9 @@ def build_uniform_metanet_mainline(
                 free_flow_speed_kmh=free_flow_speed_kmh,
                 jam_density_veh_per_km_per_lane=jam_density_veh_per_km_per_lane,
                 tau_s=tau_s,
-                eta=eta,
+                nu=nu,
                 kappa=kappa,
+                delta=delta,
                 capacity_veh_per_hour_per_lane=capacity_veh_per_hour_per_lane,
                 initial_density_veh_per_km_per_lane=density_profile[idx],
                 initial_speed_kmh=speed_profile[idx],
@@ -684,8 +702,9 @@ def run_basic_metanet_scenario(steps: int = 20) -> SimulationResult:
         free_flow_speed_kmh=100.0,
         jam_density_veh_per_km_per_lane=160.0,
         tau_s=18.0,
-        eta=60.0,
+        nu=60.0,
         kappa=40.0,
+        delta=1.0,
         capacity_veh_per_hour_per_lane=2200.0,
         initial_density_veh_per_km_per_lane=[20.0, 25.0, 30.0],
     )

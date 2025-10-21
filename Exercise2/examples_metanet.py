@@ -48,8 +48,9 @@ def example_1_basic_freeway():
         free_flow_speed_kmh=100.0,
         jam_density_veh_per_km_per_lane=160.0,
         tau_s=18.0,
-        eta=60.0,
+        nu=60.0,
         kappa=40.0,
+        delta=1.0,
         capacity_veh_per_hour_per_lane=2200.0,
     )
     
@@ -109,7 +110,7 @@ def example_2_onramp_merge():
         free_flow_speed_kmh=100.0,
         jam_density_veh_per_km_per_lane=160.0,
         tau_s=18.0,
-        eta=60.0,
+        nu=60.0,
         capacity_veh_per_hour_per_lane=2200.0,
     )
     
@@ -178,7 +179,7 @@ def example_3_ramp_metering():
         free_flow_speed_kmh=100.0,
         jam_density_veh_per_km_per_lane=160.0,
         tau_s=18.0,
-        eta=60.0,
+        nu=60.0,
         capacity_veh_per_hour_per_lane=2200.0,
     )
     
@@ -259,7 +260,7 @@ def example_4_speed_dynamics():
         free_flow_speed_kmh=110.0,
         jam_density_veh_per_km_per_lane=165.0,
         tau_s=18.0,
-        eta=60.0,
+        nu=60.0,
         kappa=40.0,
         capacity_veh_per_hour_per_lane=2100.0,
         initial_density_veh_per_km_per_lane=80.0,  # Moderate initial density
@@ -318,7 +319,7 @@ def example_5_multiple_ramps():
         free_flow_speed_kmh=110.0,
         jam_density_veh_per_km_per_lane=165.0,
         tau_s=18.0,
-        eta=60.0,
+        nu=60.0,
         kappa=40.0,
         capacity_veh_per_hour_per_lane=2100.0,
     )

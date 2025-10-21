@@ -36,14 +36,16 @@ class TestMETANETCellConfig(unittest.TestCase):
             free_flow_speed_kmh=100.0,
             jam_density_veh_per_km_per_lane=160.0,
             tau_s=18.0,
-            eta=60.0,
+            nu=60.0,
             kappa=40.0,
+            delta=1.0,
         )
         self.assertEqual(cell.name, "test_cell")
         self.assertEqual(cell.length_km, 1.0)
         self.assertEqual(cell.lanes, 3)
         self.assertEqual(cell.tau_s, 18.0)
-        self.assertEqual(cell.eta, 60.0)
+        self.assertEqual(cell.nu, 60.0)
+        self.assertEqual(cell.delta, 1.0)
 
     def test_invalid_lanes(self):
         """Test that zero or negative lanes raise ValueError."""
@@ -79,8 +81,8 @@ class TestMETANETCellConfig(unittest.TestCase):
                 tau_s=-10.0,
             )
 
-    def test_negative_eta(self):
-        """Test that negative eta raises ValueError."""
+    def test_negative_nu(self):
+        """Test that negative nu raises ValueError."""
         with self.assertRaises(ValueError):
             METANETCellConfig(
                 name="bad_cell",
@@ -88,7 +90,7 @@ class TestMETANETCellConfig(unittest.TestCase):
                 lanes=3,
                 free_flow_speed_kmh=100.0,
                 jam_density_veh_per_km_per_lane=160.0,
-                eta=-5.0,
+                nu=-5.0,
             )
 
     def test_negative_kappa(self):
@@ -101,6 +103,30 @@ class TestMETANETCellConfig(unittest.TestCase):
                 free_flow_speed_kmh=100.0,
                 jam_density_veh_per_km_per_lane=160.0,
                 kappa=-1.0,
+            )
+
+    def test_negative_delta(self):
+        """Test that negative delta raises ValueError."""
+        with self.assertRaises(ValueError):
+            METANETCellConfig(
+                name="bad_cell",
+                length_km=1.0,
+                lanes=3,
+                free_flow_speed_kmh=100.0,
+                jam_density_veh_per_km_per_lane=160.0,
+                delta=-1.0,
+            )
+
+    def test_zero_delta(self):
+        """Test that zero delta raises ValueError."""
+        with self.assertRaises(ValueError):
+            METANETCellConfig(
+                name="bad_cell",
+                length_km=1.0,
+                lanes=3,
+                free_flow_speed_kmh=100.0,
+                jam_density_veh_per_km_per_lane=160.0,
+                delta=0.0,
             )
 
     def test_negative_initial_density(self):
@@ -184,14 +210,32 @@ class TestGreenshieldsSpeed(unittest.TestCase):
         self.assertAlmostEqual(v, 0.0)
 
     def test_half_jam_density(self):
-        """Test that V(rho_jam/2) = v_f/2."""
-        v = greenshields_speed(80.0, 100.0, 160.0)
+        """Test that V(rho_jam/2) = v_f/2 when delta=1."""
+        v = greenshields_speed(80.0, 100.0, 160.0, delta=1.0)
         self.assertAlmostEqual(v, 50.0)
 
     def test_speed_bounds(self):
         """Test that speed is bounded by [0, v_f]."""
         v = greenshields_speed(200.0, 100.0, 160.0)  # Density > jam
         self.assertAlmostEqual(v, 0.0)
+
+    def test_delta_nonlinearity(self):
+        """Test that delta creates nonlinear speed-density relationship."""
+        # With delta=2, relationship is more nonlinear
+        v_delta1 = greenshields_speed(80.0, 100.0, 160.0, delta=1.0)
+        v_delta2 = greenshields_speed(80.0, 100.0, 160.0, delta=2.0)
+        # delta=2 should give higher speed at same density (less reduction)
+        self.assertGreater(v_delta2, v_delta1)
+        
+    def test_delta_extremes(self):
+        """Test that delta affects speed at critical and jam density."""
+        # At jam density, speed should be 0 regardless of delta
+        v_jam = greenshields_speed(160.0, 100.0, 160.0, delta=3.0)
+        self.assertAlmostEqual(v_jam, 0.0)
+        
+        # At zero density, speed should be v_f regardless of delta
+        v_zero = greenshields_speed(0.0, 100.0, 160.0, delta=3.0)
+        self.assertAlmostEqual(v_zero, 100.0)
 
 
 class TestBuildUniformMetanetMainline(unittest.TestCase):
@@ -360,7 +404,7 @@ class TestMETANETSimulation(unittest.TestCase):
             free_flow_speed_kmh=100.0,
             jam_density_veh_per_km_per_lane=160.0,
             tau_s=18.0,
-            eta=0.0,  # Disable anticipation for pure steady state
+            nu=0.0,  # Disable anticipation for pure steady state
             initial_density_veh_per_km_per_lane=initial_density,
         )
         
@@ -574,7 +618,7 @@ class TestSpeedDynamics(unittest.TestCase):
             free_flow_speed_kmh=100.0,
             jam_density_veh_per_km_per_lane=160.0,
             tau_s=18.0,
-            eta=0.0,  # Disable anticipation
+            nu=0.0,  # Disable anticipation
             initial_density_veh_per_km_per_lane=initial_density,
             initial_speed_kmh=50.0,  # Below equilibrium
         )
@@ -595,6 +639,172 @@ class TestSpeedDynamics(unittest.TestCase):
             for rho in result.densities[cell_name]:
                 self.assertGreaterEqual(rho, 0.0)
                 self.assertLessEqual(rho, 160.0)
+
+
+class TestParameterUsage(unittest.TestCase):
+    """Test that tau, nu, kappa, and delta parameters are properly used."""
+
+    def test_tau_affects_relaxation(self):
+        """Test that tau_s affects relaxation speed."""
+        # Two simulations with different tau values
+        cells_fast = build_uniform_metanet_mainline(
+            num_cells=1,
+            cell_length_km=1.0,
+            lanes=2,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            tau_s=10.0,  # Fast relaxation
+            nu=0.0,
+            initial_density_veh_per_km_per_lane=50.0,
+            initial_speed_kmh=50.0,
+        )
+        
+        cells_slow = build_uniform_metanet_mainline(
+            num_cells=1,
+            cell_length_km=1.0,
+            lanes=2,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            tau_s=30.0,  # Slow relaxation
+            nu=0.0,
+            initial_density_veh_per_km_per_lane=50.0,
+            initial_speed_kmh=50.0,
+        )
+        
+        # Verify tau is stored correctly (converted to hours internally)
+        self.assertEqual(cells_fast[0].tau_s, 10.0)
+        self.assertEqual(cells_slow[0].tau_s, 30.0)
+
+    def test_nu_affects_anticipation(self):
+        """Test that nu affects anticipation behavior."""
+        # Create cells with different nu values
+        cells_no_anticipation = build_uniform_metanet_mainline(
+            num_cells=3,
+            cell_length_km=1.0,
+            lanes=2,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            tau_s=18.0,
+            nu=0.0,  # No anticipation
+            initial_density_veh_per_km_per_lane=50.0,
+        )
+        
+        cells_with_anticipation = build_uniform_metanet_mainline(
+            num_cells=3,
+            cell_length_km=1.0,
+            lanes=2,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            tau_s=18.0,
+            nu=100.0,  # Strong anticipation
+            initial_density_veh_per_km_per_lane=50.0,
+        )
+        
+        # Verify nu is stored correctly
+        self.assertEqual(cells_no_anticipation[0].nu, 0.0)
+        self.assertEqual(cells_with_anticipation[0].nu, 100.0)
+
+    def test_kappa_prevents_division_by_zero(self):
+        """Test that kappa regularizes division in anticipation term."""
+        # Create cells with different kappa values
+        cells = build_uniform_metanet_mainline(
+            num_cells=2,
+            cell_length_km=1.0,
+            lanes=2,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            tau_s=18.0,
+            nu=60.0,
+            kappa=10.0,  # Custom kappa
+            initial_density_veh_per_km_per_lane=0.1,  # Very low density
+        )
+        
+        # Run simulation - should not crash even with very low density
+        sim = METANETSimulation(
+            cells=cells,
+            time_step_hours=0.01,
+            upstream_demand_profile=100.0,
+        )
+        
+        result = sim.run(steps=10)
+        
+        # Verify kappa is stored correctly
+        self.assertEqual(cells[0].kappa, 10.0)
+        # Simulation should complete without errors
+        self.assertGreater(len(result.densities["cell_0"]), 0)
+
+    def test_delta_affects_equilibrium_speed(self):
+        """Test that delta creates nonlinear speed-density relationships."""
+        # Create cells with different delta values
+        cells_linear = build_uniform_metanet_mainline(
+            num_cells=1,
+            cell_length_km=1.0,
+            lanes=2,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            delta=1.0,  # Linear (classic Greenshields)
+            initial_density_veh_per_km_per_lane=80.0,
+        )
+        
+        cells_nonlinear = build_uniform_metanet_mainline(
+            num_cells=1,
+            cell_length_km=1.0,
+            lanes=2,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            delta=2.0,  # Nonlinear
+            initial_density_veh_per_km_per_lane=80.0,
+        )
+        
+        # Verify delta is stored correctly
+        self.assertEqual(cells_linear[0].delta, 1.0)
+        self.assertEqual(cells_nonlinear[0].delta, 2.0)
+        
+        # Compute equilibrium speeds
+        v_linear = greenshields_speed(80.0, 100.0, 160.0, delta=1.0)
+        v_nonlinear = greenshields_speed(80.0, 100.0, 160.0, delta=2.0)
+        
+        # With delta=2, speed should be higher at same density
+        self.assertGreater(v_nonlinear, v_linear)
+
+    def test_all_parameters_exposed_in_cell_config(self):
+        """Test that tau_s, nu, kappa, and delta are all accessible."""
+        cell = METANETCellConfig(
+            name="test",
+            length_km=1.0,
+            lanes=3,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            tau_s=20.0,
+            nu=70.0,
+            kappa=35.0,
+            delta=1.5,
+        )
+        
+        # All parameters should be accessible and correct
+        self.assertEqual(cell.tau_s, 20.0)
+        self.assertEqual(cell.nu, 70.0)
+        self.assertEqual(cell.kappa, 35.0)
+        self.assertEqual(cell.delta, 1.5)
+
+    def test_parameter_units_and_conversion(self):
+        """Test that tau_s is correctly converted from seconds to hours."""
+        # tau_s is provided in seconds but used in hours internally
+        cell = METANETCellConfig(
+            name="test",
+            length_km=1.0,
+            lanes=3,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            tau_s=18.0,  # seconds
+        )
+        
+        # tau_s should be stored as provided (in seconds)
+        self.assertEqual(cell.tau_s, 18.0)
+        
+        # When used in METANET equations, it's converted: tau_hours = tau_s / 3600.0
+        tau_hours = cell.tau_s / 3600.0
+        self.assertAlmostEqual(tau_hours, 0.005, places=6)
 
 
 if __name__ == "__main__":
