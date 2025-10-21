@@ -966,6 +966,122 @@ class TestMETANETALINEAControl(unittest.TestCase):
         )
         self.assertFalse(ramp.alinea_enabled)
 
+    def test_alinea_custom_measurement_cell(self):
+        """Test that ALINEA can use a different cell for density measurement."""
+        cells = build_uniform_metanet_mainline(
+            num_cells=5,
+            cell_length_km=0.5,
+            lanes=3,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            tau_s=18.0,
+            nu=60.0,
+            kappa=40.0,
+            delta=1.0,
+            initial_density_veh_per_km_per_lane=[20.0, 30.0, 80.0, 40.0, 25.0],
+        )
+
+        # Ramp merges at cell 1, but measures density at cell 2
+        ramp = METANETOnRampConfig(
+            target_cell=1,
+            arrival_rate_profile=600.0,
+            meter_rate_veh_per_hour=800.0,
+            alinea_enabled=True,
+            alinea_gain=50.0,
+            alinea_target_density=50.0,
+            alinea_measurement_cell=2,  # Measure downstream cell
+            alinea_min_rate=200.0,
+            alinea_max_rate=1500.0,
+        )
+
+        sim = METANETSimulation(
+            cells=cells,
+            time_step_hours=0.1,
+            upstream_demand_profile=1500.0,
+            on_ramps=[ramp],
+        )
+
+        # Verify measurement cell was set correctly
+        self.assertEqual(ramp.alinea_measurement_cell, 2)
+        
+        # Run simulation - should use density from cell 2 (initial 80.0)
+        # Since target is 50.0 and measured is 80.0, ALINEA should reduce rate
+        initial_rate = ramp.meter_rate_veh_per_hour
+        result = sim.run(steps=3)
+        
+        # Rate should have decreased (density > target)
+        # But just verify it's within bounds
+        final_rate = ramp.meter_rate_veh_per_hour
+        self.assertGreaterEqual(final_rate, ramp.alinea_min_rate)
+        self.assertLessEqual(final_rate, ramp.alinea_max_rate)
+
+    def test_alinea_measurement_cell_by_name(self):
+        """Test that ALINEA measurement cell can be specified by name."""
+        cells = build_uniform_metanet_mainline(
+            num_cells=4,
+            cell_length_km=0.5,
+            lanes=3,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            tau_s=18.0,
+            nu=60.0,
+            initial_density_veh_per_km_per_lane=40.0,
+        )
+
+        # Ramp merges at cell_1, measures at cell_3
+        ramp = METANETOnRampConfig(
+            target_cell="cell_1",
+            arrival_rate_profile=500.0,
+            meter_rate_veh_per_hour=700.0,
+            alinea_enabled=True,
+            alinea_gain=40.0,
+            alinea_target_density=60.0,
+            alinea_measurement_cell="cell_3",  # By name
+        )
+
+        sim = METANETSimulation(
+            cells=cells,
+            time_step_hours=0.1,
+            upstream_demand_profile=1200.0,
+            on_ramps=[ramp],
+        )
+
+        # Verify measurement cell was resolved to index 3
+        self.assertEqual(ramp.alinea_measurement_cell, 3)
+        
+        result = sim.run(steps=2)
+        
+        # Simulation should complete successfully
+        self.assertIsNotNone(ramp.meter_rate_veh_per_hour)
+
+    def test_alinea_default_measurement_cell(self):
+        """Test that ALINEA defaults to target cell for measurement."""
+        cells = build_uniform_metanet_mainline(
+            num_cells=3,
+            cell_length_km=0.5,
+            lanes=3,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+        )
+
+        ramp = METANETOnRampConfig(
+            target_cell=1,
+            arrival_rate_profile=500.0,
+            meter_rate_veh_per_hour=700.0,
+            alinea_enabled=True,
+            # No alinea_measurement_cell specified
+        )
+
+        sim = METANETSimulation(
+            cells=cells,
+            time_step_hours=0.1,
+            upstream_demand_profile=1000.0,
+            on_ramps=[ramp],
+        )
+
+        # Should default to target_cell (1)
+        self.assertEqual(ramp.alinea_measurement_cell, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

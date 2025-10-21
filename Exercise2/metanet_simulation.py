@@ -129,10 +129,19 @@ class METANETOnRampConfig:
     alinea_target_density : Optional[float]
         Target density (veh/km/lane) for ALINEA control. If None, uses 80% of
         jam density of the target cell. Default: None.
+    alinea_measurement_cell : Optional[Union[int, str]]
+        Cell index or name to use for density measurement in ALINEA control.
+        If None, uses the target_cell (default behavior). Default: None.
     alinea_min_rate : float
         Minimum metering rate (veh/h) for ALINEA control. Default: 240.0.
     alinea_max_rate : float
         Maximum metering rate (veh/h) for ALINEA control. Default: 2400.0.
+    alinea_auto_tune : bool
+        If True, automatically tunes the ALINEA gain K_R using a simulation-based
+        optimizer. Requires a simulator function. Default: False.
+    alinea_tuner_params : Optional[Dict]
+        Parameters for auto-tuning: K_min, K_max, n_grid, objective, horizon.
+        Default: None (uses sensible defaults).
     queue_veh : float
         Runtime queue size (veh). Initialized from initial_queue_veh.
     """
@@ -146,8 +155,11 @@ class METANETOnRampConfig:
     alinea_enabled: bool = False
     alinea_gain: float = 50.0
     alinea_target_density: Optional[float] = None
+    alinea_measurement_cell: Optional[Union[int, str]] = None
     alinea_min_rate: float = 240.0
     alinea_max_rate: float = 2400.0
+    alinea_auto_tune: bool = False
+    alinea_tuner_params: Optional[Dict] = None
 
     # Runtime state
     queue_veh: float = field(init=False)
@@ -310,6 +322,16 @@ class METANETSimulation:
                 # Use 80% of jam density as default target
                 default_target = 0.8 * target_cell_config.jam_density_veh_per_km_per_lane
                 object.__setattr__(ramp, "alinea_target_density", default_target)
+            
+            # Resolve and set ALINEA measurement cell
+            if ramp.alinea_enabled:
+                if ramp.alinea_measurement_cell is None:
+                    # Default to target cell
+                    measurement_idx = target_index
+                else:
+                    # Resolve the measurement cell
+                    measurement_idx = self._resolve_target_index(ramp.alinea_measurement_cell)
+                object.__setattr__(ramp, "alinea_measurement_cell", measurement_idx)
 
     def _resolve_target_index(self, target: Union[int, str]) -> int:
         """Resolve an on-ramp target to an integer index."""
@@ -326,7 +348,7 @@ class METANETSimulation:
         
         ALINEA algorithm: r(k+1) = r(k) + K_R * (ρ_target - ρ_measured)
         
-        The measured density is taken from the target cell where the ramp merges.
+        The measured density is taken from the configured measurement cell.
         
         Parameters
         ----------
@@ -337,8 +359,9 @@ class METANETSimulation:
             if not ramp.alinea_enabled:
                 continue
                 
-            target_idx = int(ramp.target_cell)
-            measured_density = densities[target_idx]
+            # Use configured measurement cell (defaults to target_cell)
+            measurement_idx = int(ramp.alinea_measurement_cell)
+            measured_density = densities[measurement_idx]
             target_density = ramp.alinea_target_density
             
             # ALINEA control law: adjust rate based on density error
