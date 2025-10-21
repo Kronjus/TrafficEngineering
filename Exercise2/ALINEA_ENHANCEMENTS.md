@@ -4,11 +4,12 @@ This document describes the new features added to the ALINEA ramp metering contr
 
 ## Summary
 
-Three major enhancements have been added to the ALINEA implementation:
+Four major enhancements have been added to the ALINEA implementation:
 
 1. **Configurable measurement cell** - Choose which cell's density is used for control
 2. **Configurable r limits** - Set min/max bounds on metering rate (already existed, now documented)
 3. **Automatic gain tuning** - Find optimal gain K_R using simulation-based optimization
+4. **Adjustable slew limit** - Constrain the rate of change of the metering rate
 
 ## 1. Configurable Measurement Cell
 
@@ -210,6 +211,149 @@ Common objective functions:
 ### Full Example
 See `alinea_demo.py` Scenario 4 for a complete working example.
 
+## 4. Adjustable Slew Limit
+
+### Description
+The slew limit feature constrains how quickly the metering rate can change between time steps. This is useful for:
+- Preventing abrupt changes that could destabilize traffic flow
+- Ensuring smooth transitions in metering rate
+- Mimicking physical limitations of metering infrastructure
+- Improving driver comfort and compliance
+
+Without a slew limit, ALINEA can make large instantaneous changes to the metering rate when the density error is large. The slew limit enforces a maximum rate of change, making the control action more gradual.
+
+### Usage
+
+```python
+from ctm_simulation import OnRampConfig, CTMSimulation
+
+ramp = OnRampConfig(
+    target_cell=1,
+    arrival_rate_profile=800.0,
+    meter_rate_veh_per_hour=600.0,
+    alinea_enabled=True,
+    alinea_gain=50.0,
+    alinea_target_density=80.0,
+    alinea_min_rate=240.0,
+    alinea_max_rate=1800.0,
+    alinea_slew_limit=500.0,  # Maximum rate change: 500 veh/h per hour
+)
+
+sim = CTMSimulation(
+    cells=cells,
+    time_step_hours=0.05,  # dt = 0.05 hours (3 minutes)
+    upstream_demand_profile=5000.0,
+    on_ramps=[ramp],
+)
+```
+
+### Parameters
+- `alinea_slew_limit`: `Optional[float]` (default: `None`)
+  - Maximum rate of change of metering rate in veh/h²
+  - Units: (veh/h) per hour, i.e., veh/h²
+  - If `None`, no slew rate limiting is applied
+  - Must be positive if specified
+
+### How It Works
+
+The slew limit is applied **after** the standard ALINEA control law and rate bounds:
+
+1. **Standard ALINEA**: Compute new rate based on density error
+   ```
+   r_desired(k+1) = r(k) + K_R * (ρ_target - ρ_measured)
+   ```
+
+2. **Apply min/max bounds**: Clamp to operational limits
+   ```
+   r_bounded = clip(r_desired, r_min, r_max)
+   ```
+
+3. **Apply slew limit**: Constrain rate of change
+   ```
+   max_delta = slew_limit * dt
+   delta = r_bounded - r(k)
+   delta_limited = clip(delta, -max_delta, +max_delta)
+   r(k+1) = r(k) + delta_limited
+   ```
+
+The slew limit is symmetric: it constrains both increases and decreases in metering rate.
+
+### Units and Time Step
+
+The slew limit has units of veh/h². For a given simulation time step `dt` (in hours), the maximum allowed change in one step is:
+
+```
+max_change_per_step = slew_limit * dt  (veh/h)
+```
+
+**Example**: With `slew_limit = 500.0` veh/h² and `dt = 0.05` hours (3 minutes):
+- Maximum change per step = 500 × 0.05 = 25 veh/h
+- If current rate is 600 veh/h, the next rate can be at most 625 veh/h or at least 575 veh/h
+
+### Choosing a Slew Limit
+
+Typical values depend on the application:
+
+- **No limiting** (`None`): Fast response, but potentially abrupt changes
+- **Aggressive** (1000-2000 veh/h²): Allows relatively fast changes
+- **Moderate** (300-600 veh/h²): Balanced smoothness and responsiveness
+- **Conservative** (50-200 veh/h²): Very smooth transitions, slower response
+
+Consider:
+- Larger `dt` requires larger slew limits for comparable response
+- Higher traffic variability may benefit from faster response (higher limit)
+- Driver compliance may improve with smoother changes (lower limit)
+
+### Example Scenarios
+
+#### Without Slew Limit
+```python
+ramp = OnRampConfig(
+    target_cell=1,
+    arrival_rate_profile=800.0,
+    meter_rate_veh_per_hour=1000.0,
+    alinea_enabled=True,
+    alinea_gain=200.0,
+    alinea_target_density=50.0,
+    alinea_slew_limit=None,  # No limit
+)
+# If density suddenly increases to 150 veh/km/lane:
+# density_error = 50 - 150 = -100
+# rate_adjustment = 200 * (-100) = -20000 veh/h
+# New rate could jump to min_rate instantly
+```
+
+#### With Slew Limit
+```python
+ramp = OnRampConfig(
+    target_cell=1,
+    arrival_rate_profile=800.0,
+    meter_rate_veh_per_hour=1000.0,
+    alinea_enabled=True,
+    alinea_gain=200.0,
+    alinea_target_density=50.0,
+    alinea_slew_limit=400.0,  # Limit rate of change
+)
+# Same density increase, but with dt = 0.05 hours:
+# max_delta = 400 * 0.05 = 20 veh/h per step
+# Rate decreases gradually: 1000 → 980 → 960 → ... over multiple steps
+```
+
+### Interaction with Other Features
+
+The slew limit works seamlessly with other ALINEA features:
+
+- **r_min/r_max bounds**: Applied before slew limiting. The slew limit constrains changes to the bounded rate.
+- **Measurement cell**: Density is measured from the configured cell; slew limit affects the control output.
+- **Auto-gain tuning**: The tuned gain is used in rate calculation; slew limit smooths the resulting changes.
+
+### Benefits
+
+1. **Stability**: Prevents oscillations from overly aggressive control
+2. **Smoothness**: Reduces abrupt changes that confuse drivers
+3. **Realism**: Models physical/operational constraints of metering systems
+4. **Safety**: Avoids shock waves from rapid rate changes
+
 ## Testing
 
 All new features have comprehensive test coverage:
@@ -227,8 +371,15 @@ All new features have comprehensive test coverage:
 - `test_auto_tune_non_alinea_ramp` - Error for non-ALINEA ramps
 - `test_auto_tune_with_realistic_simulator` - Simulation-based tuning
 
+### Slew Limit Tests
+- `test_alinea_with_invalid_slew_limit` - Validate slew limit parameter
+- `test_alinea_slew_limit_constrains_rate_change` - Verify rate change constraint
+- `test_alinea_slew_limit_none_allows_unbounded_change` - Verify default behavior
+- `test_alinea_slew_limit_symmetric` - Verify symmetric application to increases/decreases
+
 Run tests:
 ```bash
+python -m unittest test_ctm_simulation.TestALINEAControl -v
 python -m unittest test_metanet_simulation.TestMETANETALINEAControl -v
 python -m unittest test_metanet_simulation.TestALINEAAutoTuning -v
 ```
@@ -240,11 +391,14 @@ Run the updated demo to see all features in action:
 python alinea_demo.py
 ```
 
-The demo includes four scenarios:
+The demo includes scenarios demonstrating:
 1. Fixed-rate metering (baseline)
 2. Standard ALINEA control
 3. ALINEA with custom measurement cell
 4. ALINEA with automatic gain tuning
+5. ALINEA with slew rate limiting (see example scenarios in this document)
+
+To add a slew limit demonstration, modify the scenarios in `alinea_demo.py` by adding the `alinea_slew_limit` parameter.
 
 ## Backward Compatibility
 
@@ -279,7 +433,7 @@ Potential improvements:
 2. **Multi-objective optimization**: Optimize multiple metrics simultaneously
 3. **Bayesian optimization**: Fewer evaluations for large parameter spaces
 4. **Sensitivity analysis**: Understand robustness to gain variations
-5. **Rate-of-change limits**: Constrain how fast metering rate can change
+5. ~~**Rate-of-change limits**: Constrain how fast metering rate can change~~ ✅ **Implemented** (slew limit)
 
 ## References
 

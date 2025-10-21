@@ -291,18 +291,93 @@ def run_with_auto_tuning():
     return result
 
 
+def run_with_slew_limit():
+    """Run scenario with ALINEA and adjustable slew rate limiting."""
+    print("\n" + "=" * 70)
+    print("Scenario 5: ALINEA with Slew Rate Limiting")
+    print("=" * 70)
+    print("Demonstrates smooth rate changes with slew limit constraint.")
+    
+    cells = build_uniform_mainline(
+        num_cells=4,
+        cell_length_km=0.5,
+        lanes=3,
+        free_flow_speed_kmh=100.0,
+        congestion_wave_speed_kmh=20.0,
+        capacity_veh_per_hour_per_lane=2200.0,
+        jam_density_veh_per_km_per_lane=160.0,
+        initial_density_veh_per_km_per_lane=120.0,  # High initial density
+    )
+
+    # ALINEA with slew limit for smooth transitions
+    on_ramp = OnRampConfig(
+        target_cell=2,
+        arrival_rate_profile=900.0,
+        meter_rate_veh_per_hour=1000.0,  # Start high
+        mainline_priority=0.7,
+        alinea_enabled=True,
+        alinea_gain=150.0,  # High gain for aggressive control
+        alinea_target_density=70.0,  # Lower target
+        alinea_min_rate=240.0,
+        alinea_max_rate=1800.0,
+        alinea_slew_limit=400.0,  # Limit rate changes to 400 veh/h²
+    )
+
+    sim = CTMSimulation(
+        cells=cells,
+        time_step_hours=0.05,  # 3 minutes
+        upstream_demand_profile=4500.0,
+        on_ramps=[on_ramp],
+    )
+
+    print(f"\nInitial conditions:")
+    print(f"  Initial metering rate: {on_ramp.meter_rate_veh_per_hour:.1f} veh/h")
+    print(f"  Initial density: 120 veh/km/lane")
+    print(f"  Target density: {on_ramp.alinea_target_density:.1f} veh/km/lane")
+    print(f"  Slew limit: {on_ramp.alinea_slew_limit:.1f} veh/h²")
+    print(f"  Max change per step: {on_ramp.alinea_slew_limit * sim.dt:.1f} veh/h")
+    
+    # Track rate evolution
+    rates = [on_ramp.meter_rate_veh_per_hour]
+    result = sim.run(steps=20)
+    
+    # Collect rate history (approximate from final values)
+    # In real usage, you'd store rates at each step
+    final_rate = on_ramp.meter_rate_veh_per_hour
+    
+    max_queue = max(result.ramp_queues["ramp_2"])
+    avg_queue = sum(result.ramp_queues["ramp_2"]) / len(result.ramp_queues["ramp_2"])
+    max_density_cell2 = max(result.densities["cell_2"])
+    
+    print(f"\nResults after 20 steps:")
+    print(f"  Final metering rate: {final_rate:.1f} veh/h")
+    print(f"  Rate change: {final_rate - rates[0]:.1f} veh/h")
+    print(f"  Maximum ramp queue: {max_queue:.1f} vehicles")
+    print(f"  Average ramp queue: {avg_queue:.1f} vehicles")
+    print(f"  Maximum density at merge cell: {max_density_cell2:.1f} veh/km/lane")
+    
+    print(f"\nSlew limit effect:")
+    print(f"  Without slew limit: Rate could change by ~{150.0 * (70.0 - 120.0):.0f} veh/h instantly")
+    print(f"  With slew limit: Rate changes gradually by max {on_ramp.alinea_slew_limit * sim.dt:.1f} veh/h per step")
+    print(f"  Result: Smoother control action, better driver compliance")
+    
+    return result
+
+
 def compare_scenarios():
     """Compare fixed metering vs ALINEA control."""
     print("\n" + "=" * 70)
     print("ALINEA Ramp Metering Demonstration")
     print("=" * 70)
     print("\nThis demo compares fixed-rate metering with ALINEA feedback control")
-    print("and demonstrates new features: custom measurement cells and auto-tuning.")
+    print("and demonstrates new features: custom measurement cells, auto-tuning,")
+    print("and slew rate limiting.")
     
     result_fixed = run_without_alinea()
     result_alinea = run_with_alinea()
     result_custom = run_with_custom_measurement_cell()
     result_tuned = run_with_auto_tuning()
+    result_slew = run_with_slew_limit()
     
     print("\n" + "=" * 70)
     print("Summary Comparison")
@@ -330,6 +405,10 @@ def compare_scenarios():
     print("    - Grid search over K values to find optimal gain")
     print("    - Minimizes density tracking error (RMSE)")
     print("    - Can use custom objective functions")
+    print("\n  ✓ Adjustable slew rate limiting (Scenario 5)")
+    print("    - Constrains how quickly metering rate can change")
+    print("    - Prevents abrupt changes and improves stability")
+    print("    - Mimics physical limitations of metering systems")
     print("\n  ✓ Configurable r_min and r_max limits")
     print("    - Already demonstrated in all ALINEA scenarios")
     print("    - Ensures safe metering rate bounds")
