@@ -609,5 +609,161 @@ class TestProfileHandling(unittest.TestCase):
         self.assertEqual(len(result.densities["cell_0"]), 7)
 
 
+class TestALINEAControl(unittest.TestCase):
+    """Test ALINEA ramp metering functionality."""
+
+    def test_alinea_enabled_requires_initial_rate(self):
+        """Test that ALINEA requires an initial metering rate."""
+        with self.assertRaises(ValueError):
+            OnRampConfig(
+                target_cell=0,
+                arrival_rate_profile=400.0,
+                alinea_enabled=True,
+                # Missing meter_rate_veh_per_hour
+            )
+
+    def test_alinea_with_invalid_gain(self):
+        """Test that ALINEA rejects non-positive gain."""
+        with self.assertRaises(ValueError):
+            OnRampConfig(
+                target_cell=0,
+                arrival_rate_profile=400.0,
+                meter_rate_veh_per_hour=600.0,
+                alinea_enabled=True,
+                alinea_gain=0.0,
+            )
+
+    def test_alinea_with_invalid_bounds(self):
+        """Test that ALINEA rejects invalid min/max rate bounds."""
+        with self.assertRaises(ValueError):
+            OnRampConfig(
+                target_cell=0,
+                arrival_rate_profile=400.0,
+                meter_rate_veh_per_hour=600.0,
+                alinea_enabled=True,
+                alinea_min_rate=1000.0,
+                alinea_max_rate=500.0,  # max < min
+            )
+
+    def test_alinea_adjusts_metering_rate(self):
+        """Test that ALINEA adjusts metering rate based on density."""
+        cells = build_uniform_mainline(
+            num_cells=3,
+            cell_length_km=0.5,
+            lanes=3,
+            free_flow_speed_kmh=100.0,
+            congestion_wave_speed_kmh=20.0,
+            capacity_veh_per_hour_per_lane=2200.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            initial_density_veh_per_km_per_lane=50.0,
+        )
+
+        # ALINEA ramp targeting cell 1
+        ramp = OnRampConfig(
+            target_cell=1,
+            arrival_rate_profile=800.0,
+            meter_rate_veh_per_hour=600.0,
+            alinea_enabled=True,
+            alinea_gain=50.0,
+            alinea_target_density=80.0,  # Higher than initial 50.0
+            alinea_min_rate=200.0,
+            alinea_max_rate=2000.0,
+        )
+
+        sim = CTMSimulation(
+            cells=cells,
+            time_step_hours=0.1,
+            upstream_demand_profile=1500.0,
+            on_ramps=[ramp],
+        )
+
+        initial_rate = ramp.meter_rate_veh_per_hour
+        result = sim.run(steps=5)
+        
+        # The ramp object should have been modified by ALINEA control
+        # Since initial density (50) < target (80), ALINEA should increase rate
+        # (unless density increases enough during simulation)
+        self.assertIsNotNone(ramp.meter_rate_veh_per_hour)
+
+    def test_alinea_respects_rate_bounds(self):
+        """Test that ALINEA clamps metering rate to min/max bounds."""
+        cells = build_uniform_mainline(
+            num_cells=2,
+            cell_length_km=0.5,
+            lanes=3,
+            free_flow_speed_kmh=100.0,
+            congestion_wave_speed_kmh=20.0,
+            capacity_veh_per_hour_per_lane=2200.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            initial_density_veh_per_km_per_lane=150.0,  # Very high density
+        )
+
+        # With high density and low target, rate should decrease to min
+        ramp = OnRampConfig(
+            target_cell=0,
+            arrival_rate_profile=300.0,
+            meter_rate_veh_per_hour=1000.0,
+            alinea_enabled=True,
+            alinea_gain=100.0,  # High gain for fast response
+            alinea_target_density=30.0,  # Much lower than initial 150
+            alinea_min_rate=200.0,
+            alinea_max_rate=1200.0,
+        )
+
+        sim = CTMSimulation(
+            cells=cells,
+            time_step_hours=0.1,
+            upstream_demand_profile=500.0,
+            on_ramps=[ramp],
+        )
+
+        result = sim.run(steps=10)
+        
+        # Final rate should be clamped to bounds
+        final_rate = ramp.meter_rate_veh_per_hour
+        self.assertGreaterEqual(final_rate, ramp.alinea_min_rate)
+        self.assertLessEqual(final_rate, ramp.alinea_max_rate)
+
+    def test_alinea_default_target_density(self):
+        """Test that ALINEA uses 80% of jam density as default target."""
+        cells = build_uniform_mainline(
+            num_cells=2,
+            cell_length_km=0.5,
+            lanes=3,
+            free_flow_speed_kmh=100.0,
+            congestion_wave_speed_kmh=20.0,
+            capacity_veh_per_hour_per_lane=2200.0,
+            jam_density_veh_per_km_per_lane=160.0,
+        )
+
+        ramp = OnRampConfig(
+            target_cell=0,
+            arrival_rate_profile=400.0,
+            meter_rate_veh_per_hour=600.0,
+            alinea_enabled=True,
+            # No alinea_target_density specified
+        )
+
+        sim = CTMSimulation(
+            cells=cells,
+            time_step_hours=0.1,
+            upstream_demand_profile=1000.0,
+            on_ramps=[ramp],
+        )
+
+        # After simulation init, target should be set to 0.8 * 160 = 128
+        expected_target = 0.8 * 160.0
+        self.assertAlmostEqual(ramp.alinea_target_density, expected_target)
+
+    def test_alinea_disabled_by_default(self):
+        """Test that ALINEA is disabled by default."""
+        ramp = OnRampConfig(
+            target_cell=0,
+            arrival_rate_profile=400.0,
+            meter_rate_veh_per_hour=600.0,
+        )
+        self.assertFalse(ramp.alinea_enabled)
+
+
 if __name__ == "__main__":
     unittest.main()

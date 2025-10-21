@@ -113,12 +113,26 @@ class METANETOnRampConfig:
         Arrival demand profile (veh/h).
     meter_rate_veh_per_hour : Optional[float]
         Optional ramp metering rate (veh/h). If None, the ramp is unmetered.
+        If ALINEA is enabled, this serves as the initial metering rate.
     mainline_priority : float
         Fraction in [0, 1] giving priority share to mainline when merging.
     initial_queue_veh : float
         Initial queued vehicles on the ramp (veh).
     name : Optional[str]
         Optional human-readable identifier for the ramp.
+    alinea_enabled : bool
+        If True, enables ALINEA feedback ramp metering control. Requires
+        meter_rate_veh_per_hour as initial rate. Default: False.
+    alinea_gain : float
+        ALINEA regulator gain K_R (veh/h per veh/km/lane). Higher values lead
+        to more aggressive control. Typical range: 40-70. Default: 50.0.
+    alinea_target_density : Optional[float]
+        Target density (veh/km/lane) for ALINEA control. If None, uses 80% of
+        jam density of the target cell. Default: None.
+    alinea_min_rate : float
+        Minimum metering rate (veh/h) for ALINEA control. Default: 240.0.
+    alinea_max_rate : float
+        Maximum metering rate (veh/h) for ALINEA control. Default: 2400.0.
     queue_veh : float
         Runtime queue size (veh). Initialized from initial_queue_veh.
     """
@@ -129,6 +143,11 @@ class METANETOnRampConfig:
     mainline_priority: float = 0.5
     initial_queue_veh: float = 0.0
     name: Optional[str] = None
+    alinea_enabled: bool = False
+    alinea_gain: float = 50.0
+    alinea_target_density: Optional[float] = None
+    alinea_min_rate: float = 240.0
+    alinea_max_rate: float = 2400.0
 
     # Runtime state
     queue_veh: float = field(init=False)
@@ -140,6 +159,26 @@ class METANETOnRampConfig:
             raise ValueError("meter_rate_veh_per_hour cannot be negative.")
         if self.initial_queue_veh < 0:
             raise ValueError("initial_queue_veh cannot be negative.")
+        
+        # ALINEA validation
+        if self.alinea_enabled:
+            if self.meter_rate_veh_per_hour is None:
+                raise ValueError(
+                    "ALINEA requires an initial meter_rate_veh_per_hour."
+                )
+            if self.alinea_gain <= 0:
+                raise ValueError("alinea_gain must be positive.")
+            if self.alinea_min_rate < 0:
+                raise ValueError("alinea_min_rate cannot be negative.")
+            if self.alinea_max_rate <= 0:
+                raise ValueError("alinea_max_rate must be positive.")
+            if self.alinea_min_rate > self.alinea_max_rate:
+                raise ValueError(
+                    "alinea_min_rate must not exceed alinea_max_rate."
+                )
+            if self.alinea_target_density is not None and self.alinea_target_density <= 0:
+                raise ValueError("alinea_target_density must be positive.")
+        
         self.queue_veh = float(self.initial_queue_veh)
 
 
@@ -264,6 +303,13 @@ class METANETSimulation:
                     "Only one on-ramp per target cell is supported."
                 )
             self._ramps_by_cell[target_index] = ramp
+            
+            # Set default ALINEA target density if not specified
+            if ramp.alinea_enabled and ramp.alinea_target_density is None:
+                target_cell_config = self.cells[target_index]
+                # Use 80% of jam density as default target
+                default_target = 0.8 * target_cell_config.jam_density_veh_per_km_per_lane
+                object.__setattr__(ramp, "alinea_target_density", default_target)
 
     def _resolve_target_index(self, target: Union[int, str]) -> int:
         """Resolve an on-ramp target to an integer index."""
@@ -274,6 +320,41 @@ class METANETSimulation:
         if target not in self._cell_index:
             raise KeyError(f"Unknown cell name '{target}'.")
         return self._cell_index[target]
+
+    def _apply_alinea_control(self, densities: Sequence[float]) -> None:
+        """Apply ALINEA feedback control to update ramp metering rates.
+        
+        ALINEA algorithm: r(k+1) = r(k) + K_R * (ρ_target - ρ_measured)
+        
+        The measured density is taken from the target cell where the ramp merges.
+        
+        Parameters
+        ----------
+        densities : Sequence[float]
+            Current densities (veh/km/lane) for all mainline cells.
+        """
+        for ramp in self.on_ramps:
+            if not ramp.alinea_enabled:
+                continue
+                
+            target_idx = int(ramp.target_cell)
+            measured_density = densities[target_idx]
+            target_density = ramp.alinea_target_density
+            
+            # ALINEA control law: adjust rate based on density error
+            # K_R is in (veh/h) per (veh/km/lane), so units work out to veh/h
+            density_error = target_density - measured_density
+            rate_adjustment = ramp.alinea_gain * density_error
+            
+            # Update metering rate
+            current_rate = ramp.meter_rate_veh_per_hour or 0.0
+            new_rate = current_rate + rate_adjustment
+            
+            # Clamp to min/max bounds
+            new_rate = max(ramp.alinea_min_rate, min(new_rate, ramp.alinea_max_rate))
+            
+            # Update the ramp's metering rate
+            object.__setattr__(ramp, "meter_rate_veh_per_hour", new_rate)
 
     def run(self, steps: int) -> SimulationResult:
         """Run the METANET simulation for the requested number of time steps.
@@ -323,6 +404,9 @@ class METANETSimulation:
 
         # Main time-stepping loop
         for step in range(steps):
+            # Apply ALINEA feedback control if enabled
+            self._apply_alinea_control(densities)
+            
             # Update on-ramp queues and get potential ramp flows
             ramp_potentials = self._update_ramp_queues(step)
             ramp_flows_step: Dict[str, float] = {
