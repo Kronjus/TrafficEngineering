@@ -15,30 +15,94 @@ offer a pedagogical reference for CTM simulations.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import inspect
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
+
 
 NumberLike = Union[float, int]
 Profile = Union[
     NumberLike,
     Sequence[NumberLike],
-    Callable[[int], NumberLike],
+    Callable[..., NumberLike],
 ]
 
 
-def _get_profile_value(profile: Profile, step: int) -> float:
+_SECONDS_PARAM_NAMES = {"t_s", "time_s", "time_seconds", "seconds", "t"}
+_HOURS_PARAM_NAMES = {"t_h", "time_h", "time_hours", "hours"}
+_STEP_PARAM_NAMES = {"step", "k", "index", "iteration", "idx"}
+
+
+def _get_profile_value(profile: Profile, step: int, dt_hours: float) -> float:
     """Return the value of a demand/supply profile at ``step``.
 
     Parameters
     ----------
     profile:
         Either a constant (``int`` or ``float``), a sequence indexed by the
-        simulation step, or a callable that receives the current step and
-        returns a numeric value.
+        simulation step, or a callable.  Callables may accept the simulation
+        time (in seconds or hours) or the discrete step index; see below.
     step:
         Zero-based simulation step.
+    dt_hours:
+        Simulation time-step expressed in hours.
     """
 
     if callable(profile):  # type: ignore[arg-type]
+        time_hours = step * dt_hours
+        time_seconds = time_hours * 3600.0
+
+        try:
+            signature = inspect.signature(profile)
+        except (TypeError, ValueError):
+            signature = None
+
+        if signature is not None:
+            positional = [
+                parameter
+                for parameter in signature.parameters.values()
+                if parameter.kind
+                in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            ]
+
+            if positional:
+                first = positional[0]
+                param_name = first.name
+
+                if param_name in _SECONDS_PARAM_NAMES:
+                    return float(profile(time_seconds))
+                if param_name in _HOURS_PARAM_NAMES:
+                    return float(profile(time_hours))
+                if param_name in _STEP_PARAM_NAMES:
+                    return float(profile(step))
+
+                if first.default is inspect._empty:
+                    # Unknown required positional parameter – default to the
+                    # legacy behaviour (step index) for backwards compatibility.
+                    return float(profile(step))
+
+            try:
+                return float(
+                    profile(
+                        step=step,
+                        time_hours=time_hours,
+                        time_seconds=time_seconds,
+                    )
+                )
+            except TypeError:
+                # Fall back to legacy behaviour below.
+                pass
+
+        # Default to historic semantics (step index) and offer additional
+        # fallbacks so that callables expecting time-based arguments can still
+        # be used even when signature introspection fails.
+        for argument in (time_seconds, time_hours, step):
+            try:
+                return float(profile(argument))
+            except TypeError:
+                continue
         return float(profile(step))
     if isinstance(profile, Sequence):  # type: ignore[arg-type]
         if step < len(profile):
@@ -64,11 +128,11 @@ class CellConfig:
         if self.lanes <= 0:
             raise ValueError("Number of lanes must be positive.")
         for attr in (
-                self.length_km,
-                self.free_flow_speed_kmh,
-                self.congestion_wave_speed_kmh,
-                self.capacity_veh_per_hour_per_lane,
-                self.jam_density_veh_per_km_per_lane,
+            self.length_km,
+            self.free_flow_speed_kmh,
+            self.congestion_wave_speed_kmh,
+            self.capacity_veh_per_hour_per_lane,
+            self.jam_density_veh_per_km_per_lane,
         ):
             if attr <= 0:
                 raise ValueError("Cell parameters must be positive.")
@@ -187,12 +251,12 @@ class CTMSimulation:
     """Cell Transmission Model simulator supporting on-ramps."""
 
     def __init__(
-            self,
-            cells: Sequence[CellConfig],
-            time_step_hours: float,
-            upstream_demand_profile: Profile,
-            downstream_supply_profile: Optional[Profile] = None,
-            on_ramps: Optional[Sequence[OnRampConfig]] = None,
+        self,
+        cells: Sequence[CellConfig],
+        time_step_hours: float,
+        upstream_demand_profile: Profile,
+        downstream_supply_profile: Optional[Profile] = None,
+        on_ramps: Optional[Sequence[OnRampConfig]] = None,
     ) -> None:
         if time_step_hours <= 0:
             raise ValueError("time_step_hours must be positive.")
@@ -259,12 +323,17 @@ class CTMSimulation:
             inflows = [0.0] * len(self.cells)
             outflows = [0.0] * len(self.cells)
 
-            upstream_demand = _get_profile_value(self.upstream_profile, step)
-            downstream_supply = (
-                _get_profile_value(self.downstream_profile, step)
-                if self.downstream_profile is not None
-                else float("inf")
+            upstream_demand = _get_profile_value(self.upstream_profile, step, self.dt)
+            last_cell = self.cells[-1]
+            max_downstream_flow = (
+                last_cell.capacity_veh_per_hour_per_lane * last_cell.lanes
             )
+            downstream_supply_raw = (
+                _get_profile_value(self.downstream_profile, step, self.dt)
+                if self.downstream_profile is not None
+                else max_downstream_flow
+            )
+            downstream_supply = max(0.0, min(downstream_supply_raw, max_downstream_flow))
 
             # Flows into each cell from upstream (including boundary to first cell).
             for idx in range(len(self.cells)):
@@ -345,7 +414,7 @@ class CTMSimulation:
     def _update_ramp_queues(self, step: int) -> Dict[str, float]:
         potentials: Dict[str, float] = {}
         for ramp in self.on_ramps:
-            arrivals = _get_profile_value(ramp.arrival_rate_profile, step)
+            arrivals = _get_profile_value(ramp.arrival_rate_profile, step, self.dt)
             ramp.queue_veh += arrivals * self.dt
             meter_rate = ramp.meter_rate_veh_per_hour
             potential = ramp.queue_veh / self.dt
@@ -355,11 +424,11 @@ class CTMSimulation:
         return potentials
 
     def _merge_flows(
-            self,
-            mainline_demand: float,
-            ramp_demand: float,
-            supply: float,
-            mainline_priority: float,
+        self,
+        mainline_demand: float,
+        ramp_demand: float,
+        supply: float,
+        mainline_priority: float,
     ) -> Tuple[float, float]:
         if supply <= 0:
             return 0.0, 0.0
@@ -391,29 +460,29 @@ class CTMSimulation:
         return main_flow, ramp_flow
 
     def _update_density(
-            self,
-            density: float,
-            inflow: float,
-            outflow: float,
-            cell: CellConfig,
+        self,
+        density: float,
+        inflow: float,
+        outflow: float,
+        cell: CellConfig,
     ) -> float:
         change = (self.dt / cell.length_km) * (
-                inflow / cell.lanes - outflow / cell.lanes
+            inflow / cell.lanes - outflow / cell.lanes
         )
         new_density = density + change
         return max(0.0, min(new_density, cell.jam_density_veh_per_km_per_lane))
 
 
 def build_uniform_mainline(
-        *,
-        num_cells: int,
-        cell_length_km: float,
-        lanes: Sequence[int] | int,
-        free_flow_speed_kmh: float,
-        congestion_wave_speed_kmh: float,
-        capacity_veh_per_hour_per_lane: float,
-        jam_density_veh_per_km_per_lane: float,
-        initial_density_veh_per_km_per_lane: float | Sequence[float] = 0.0,
+    *,
+    num_cells: int,
+    cell_length_km: float,
+    lanes: Sequence[int] | int,
+    free_flow_speed_kmh: float,
+    congestion_wave_speed_kmh: float,
+    capacity_veh_per_hour_per_lane: float,
+    jam_density_veh_per_km_per_lane: float,
+    initial_density_veh_per_km_per_lane: float | Sequence[float] = 0.0,
 ) -> List[CellConfig]:
     """Utility to create a list of :class:`CellConfig` objects quickly.
 
@@ -522,6 +591,7 @@ __all__ = [
     "build_uniform_mainline",
     "run_basic_scenario",
 ]
+
 
 if __name__ == "__main__":  # pragma: no cover - convenience usage
     result = run_basic_scenario(steps=20)
