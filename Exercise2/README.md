@@ -16,6 +16,7 @@ The Cell Transmission Model (CTM) is a discrete approximation of the Lighthill-W
 - **Triangular fundamental diagram** (free-flow speed, congestion wave speed, capacity, jam density)
 - **Time-varying demand profiles** for upstream boundary and on-ramps
 - **On-ramp merging** with configurable priority and optional metering
+- **ALINEA ramp metering** optional feedback control for congestion prevention
 - **Queue dynamics** for on-ramps that cannot immediately merge
 - **Heterogeneous cells** supporting lane drops/additions and varying parameters
 
@@ -27,6 +28,7 @@ METANET is a second-order macroscopic traffic flow model that tracks both densit
 - **Greenshields equilibrium speed** function (customizable)
 - **Compatible API** with CTM for easy model comparison
 - **Advanced traffic behavior** modeling driver anticipation and wave propagation
+- **ALINEA ramp metering** same feedback control capability as CTM
 - **Same features** as CTM (on-ramps, metering, heterogeneous cells)
 
 ## Quick Start
@@ -174,8 +176,8 @@ cells = build_uniform_metanet_mainline(
     free_flow_speed_kmh=100.0,
     jam_density_veh_per_km_per_lane=160.0,
     tau_s=18.0,  # Relaxation time (seconds)
-    eta=60.0,    # Anticipation coefficient
-    kappa=40.0,  # Regularization constant
+    nu=60.0,     # Anticipation coefficient (km²/h)
+    kappa=40.0,  # Regularization constant (veh/km/lane)
 )
 
 # Configure on-ramp (same API as CTM)
@@ -238,6 +240,145 @@ Configuration for an on-ramp:
 - `meter_rate_veh_per_hour`: Optional metering rate limit
 - `mainline_priority`: Merge priority 0-1 (higher favors mainline)
 - `initial_queue_veh`: Initial queue length (default: 0)
+- `alinea_enabled`: Enable ALINEA feedback ramp metering (default: False)
+- `alinea_gain`: ALINEA regulator gain K_R (default: 50.0 veh/h per veh/km/lane)
+- `alinea_target_density`: Target density for control (default: 80% of jam density)
+- `alinea_min_rate`: Minimum metering rate (default: 240.0 veh/h)
+- `alinea_max_rate`: Maximum metering rate (default: 2400.0 veh/h)
+
+### ALINEA Ramp Metering
+
+Both CTM and METANET simulators support optional ALINEA feedback ramp metering control. ALINEA is a local feedback strategy that adjusts the ramp metering rate based on downstream mainline density.
+
+#### ALINEA Algorithm
+
+The ALINEA control law is:
+
+```
+r(k+1) = r(k) + K_R × (ρ_target - ρ_measured)
+```
+
+Where:
+- `r(k)` is the metering rate at time step k (veh/h)
+- `K_R` is the regulator gain (veh/h per veh/km/lane)
+- `ρ_target` is the desired occupancy/density (veh/km/lane)
+- `ρ_measured` is the measured density at the target cell (veh/km/lane)
+
+The metering rate is clamped to `[alinea_min_rate, alinea_max_rate]`.
+
+#### Using ALINEA
+
+**CTM Example:**
+```python
+from Exercise2.ctm_simulation import (
+    build_uniform_mainline,
+    CTMSimulation,
+    OnRampConfig,
+)
+
+cells = build_uniform_mainline(
+    num_cells=5,
+    cell_length_km=0.5,
+    lanes=3,
+    free_flow_speed_kmh=100.0,
+    congestion_wave_speed_kmh=20.0,
+    capacity_veh_per_hour_per_lane=2200.0,
+    jam_density_veh_per_km_per_lane=160.0,
+)
+
+# On-ramp with ALINEA control
+on_ramp = OnRampConfig(
+    target_cell=2,
+    arrival_rate_profile=800.0,
+    meter_rate_veh_per_hour=600.0,  # Initial rate
+    alinea_enabled=True,             # Enable ALINEA
+    alinea_gain=50.0,                # Control gain
+    alinea_target_density=120.0,     # Target density (veh/km/lane)
+    alinea_min_rate=240.0,           # Min metering rate
+    alinea_max_rate=1800.0,          # Max metering rate
+)
+
+sim = CTMSimulation(
+    cells=cells,
+    time_step_hours=0.1,
+    upstream_demand_profile=5000.0,
+    on_ramps=[on_ramp],
+)
+
+result = sim.run(steps=50)
+```
+
+**METANET Example:**
+```python
+from Exercise2.metanet_simulation import (
+    build_uniform_metanet_mainline,
+    METANETSimulation,
+    METANETOnRampConfig,
+)
+
+cells = build_uniform_metanet_mainline(
+    num_cells=5,
+    cell_length_km=0.5,
+    lanes=3,
+    free_flow_speed_kmh=100.0,
+    jam_density_veh_per_km_per_lane=160.0,
+    tau_s=18.0,     # Relaxation time (seconds)
+    nu=60.0,        # Anticipation coefficient (km²/h)
+    kappa=40.0,     # Regularization constant (veh/km/lane)
+    delta=1.0,      # Equilibrium speed exponent
+)
+
+# ALINEA-controlled ramp (same API as CTM)
+on_ramp = METANETOnRampConfig(
+    target_cell=2,
+    arrival_rate_profile=800.0,
+    meter_rate_veh_per_hour=600.0,
+    alinea_enabled=True,
+    alinea_gain=50.0,
+    alinea_target_density=120.0,
+)
+
+sim = METANETSimulation(
+    cells=cells,
+    time_step_hours=0.1,
+    upstream_demand_profile=5000.0,
+    on_ramps=[on_ramp],
+)
+
+result = sim.run(steps=50)
+```
+
+#### ALINEA Parameter Guidelines
+
+**Regulator Gain (K_R)**:
+- Typical range: 40-70 veh/h per veh/km/lane
+- Higher values → more aggressive control, faster response
+- Lower values → smoother control, slower response
+- Default: 50.0
+
+**Target Density (ρ_target)**:
+- Should be below critical density to maintain free flow
+- Typical range: 60-90% of jam density
+- Default: 80% of target cell's jam density
+- Trade-off between throughput and preventing congestion
+
+**Min/Max Metering Rate**:
+- `alinea_min_rate`: Minimum allowed metering rate (e.g., 240 veh/h or 4 veh/min)
+- `alinea_max_rate`: Maximum allowed metering rate (e.g., 2400 veh/h or 40 veh/min)
+- Prevents extreme control actions and ensures physical feasibility
+
+#### Benefits of ALINEA
+
+1. **Prevents mainline congestion** by limiting ramp inflow when density is high
+2. **Maximizes throughput** by allowing more flow when capacity is available
+3. **Local feedback** - no need for system-wide coordination
+4. **Simple and robust** - proven effective in real-world deployments
+5. **Self-regulating** - adapts to changing traffic conditions automatically
+
+#### References
+
+- Papageorgiou, M., Hadj-Salem, H., & Blosseville, J. M. (1991). "ALINEA: A local feedback control law for on-ramp metering." *Transportation Research Record*, 1320, 58-67.
+- Papageorgiou, M., & Kotsialos, A. (2002). "Freeway ramp metering: An overview." *IEEE Transactions on Intelligent Transportation Systems*, 3(4), 271-281.
 
 ### `CTMSimulation`
 Main simulator class:
@@ -255,13 +396,13 @@ Container for simulation outputs with time series and helper methods.
 Run the comprehensive test suites:
 
 ```bash
-# Test CTM (32 tests)
+# Test CTM (39 tests including ALINEA)
 python -m unittest Exercise2.test_ctm_simulation -v
 
-# Test METANET (35 tests)
+# Test METANET (52 tests including ALINEA)
 python -m unittest Exercise2.test_metanet_simulation -v
 
-# Test both together (67 tests)
+# Test both together (91 tests)
 python -m unittest Exercise2.test_ctm_simulation Exercise2.test_metanet_simulation -v
 ```
 
@@ -275,6 +416,7 @@ The test suites cover:
 - Merge priority behavior
 - Speed dynamics (METANET only)
 - Steady-state preservation
+- ALINEA ramp metering control
 
 ## Helper Functions
 
