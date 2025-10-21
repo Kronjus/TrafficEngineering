@@ -36,27 +36,31 @@ Where:
 vᵢ(k+1) = vᵢ(k) + T * [
     (V(ρᵢ) - vᵢ) / τ                           // Relaxation term
     - (vᵢ / Lᵢ) * (vᵢ - vᵢ₋₁)                  // Convection term
-    - (η / τ) * (ρᵢ₊₁ - ρᵢ) / (ρᵢ + κ)        // Anticipation term
+    - (ν / τ) * (ρᵢ₊₁ - ρᵢ) / (ρᵢ + κ)        // Anticipation term
 ]
 ```
 
 Where:
 - `V(ρᵢ)`: equilibrium speed at density `ρᵢ` (km/h)
 - `τ`: relaxation time constant (seconds)
-- `η`: anticipation coefficient (km²/h)
+- `ν` (nu): anticipation/diffusion coefficient (km²/h)
 - `κ`: small regularization constant (veh/km/lane)
 
 ### Equilibrium Speed Function
 
-The default equilibrium speed function is Greenshields' linear model:
+The default equilibrium speed function is the generalized Greenshields model:
 
 ```
-V(ρ) = vf * (1 - ρ/ρⱼₐₘ)
+V(ρ) = vf * (1 - (ρ/ρⱼₐₘ)^δ)
 ```
 
 Where:
 - `vf`: free-flow speed (km/h)
 - `ρⱼₐₘ`: jam density (veh/km/lane)
+- `δ` (delta): dimensionless exponent controlling nonlinearity (typically 1-4)
+
+When `δ = 1`, this reduces to the classic linear Greenshields model.
+Higher values of `δ` create more nonlinear speed-density relationships.
 
 Other models (e.g., exponential) can be provided via the `equilibrium_speed_func` parameter.
 
@@ -72,10 +76,10 @@ Other models (e.g., exponential) can be provided via the `equilibrium_speed_func
    - Models drivers adjusting speed based on upstream traffic
    - Only active when there is upstream flow
 
-3. **Anticipation Term**: `-(η / τ) * (ρᵢ₊₁ - ρᵢ) / (ρᵢ + κ)`
+3. **Anticipation Term**: `-(ν / τ) * (ρᵢ₊₁ - ρᵢ) / (ρᵢ + κ)`
    - Models drivers' anticipatory behavior to downstream congestion
    - Drivers slow down when they see higher density ahead
-   - `η` controls the strength of anticipation
+   - `ν` (nu) controls the strength of anticipation
    - `κ` prevents division by zero at low densities
 
 ## Parameters
@@ -95,8 +99,9 @@ Each METANET cell requires:
 
 - **METANET-specific parameters:**
   - `tau_s`: Relaxation time τ (seconds), default: 18.0s
-  - `eta`: Anticipation coefficient η (km²/h), default: 60.0
+  - `nu`: Anticipation/diffusion coefficient ν (km²/h), default: 60.0
   - `kappa`: Regularization constant κ (veh/km/lane), default: 40.0
+  - `delta`: Dimensionless exponent δ for equilibrium speed, default: 1.0
 
 - **Initial conditions:**
   - `initial_density_veh_per_km_per_lane`: Initial density (veh/km/lane)
@@ -146,8 +151,9 @@ cells = build_uniform_metanet_mainline(
     free_flow_speed_kmh=100.0,
     jam_density_veh_per_km_per_lane=160.0,
     tau_s=18.0,
-    eta=60.0,
+    nu=60.0,
     kappa=40.0,
+    delta=1.0,
 )
 
 # Create simulation
