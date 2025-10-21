@@ -293,7 +293,7 @@ class METANETSimulation:
                     cell.free_flow_speed_kmh,
                     cell.jam_density_veh_per_km_per_lane,
                 )
-                speeds.append(v_eq)
+                speeds.append(max(1.0, v_eq))  # Ensure non-zero initial speed
 
         # Initialize history containers
         density_history: Dict[str, List[float]] = {
@@ -330,9 +330,6 @@ class METANETSimulation:
             )
             downstream_supply = max(0.0, min(downstream_supply_raw, max_downstream_flow))
 
-            # Compute flows from current densities and speeds
-            flows = self._compute_flows(densities, speeds)
-
             # Prepare inflow/outflow accumulators
             inflows = [0.0] * len(self.cells)
             outflows = [0.0] * len(self.cells)
@@ -342,9 +339,15 @@ class METANETSimulation:
                 # Receiving capacity based on available space
                 receiving = self._compute_receiving(densities[idx], self.cells[idx])
                 
-                mainline_demand = upstream_demand if idx == 0 else flows[idx - 1]
+                # Demand from upstream (either boundary or previous cell)
+                if idx == 0:
+                    mainline_demand = upstream_demand
+                else:
+                    # Flow from previous cell = min(sending, previous receiving)
+                    mainline_demand = densities[idx-1] * speeds[idx-1] * self.cells[idx-1].lanes
+                    mainline_demand = min(mainline_demand, self.cells[idx-1].capacity_veh_per_hour_per_lane * self.cells[idx-1].lanes)
+                
                 ramp_flow = 0.0
-
                 ramp = self._ramps_by_cell.get(idx)
                 if ramp is not None:
                     # Merge mainline and ramp
@@ -362,19 +365,20 @@ class METANETSimulation:
                     main_flow = min(mainline_demand, receiving)
 
                 inflow = main_flow + ramp_flow
-                inflows[idx] += inflow
+                inflows[idx] = inflow
 
                 if idx > 0:
                     outflows[idx - 1] = main_flow
 
             # Handle flow out of the last cell
             last_idx = len(self.cells) - 1
-            outflow_last = min(flows[last_idx], downstream_supply)
+            last_flow = densities[last_idx] * speeds[last_idx] * self.cells[last_idx].lanes
+            last_flow = min(last_flow, self.cells[last_idx].capacity_veh_per_hour_per_lane * self.cells[last_idx].lanes)
+            outflow_last = min(last_flow, downstream_supply)
             outflows[last_idx] = outflow_last
-            flow_history[self.cells[last_idx].name].append(outflow_last)
 
-            # Record flows for internal links
-            for idx in range(len(self.cells) - 1):
+            # Record flows for all cells
+            for idx in range(len(self.cells)):
                 flow_history[self.cells[idx].name].append(outflows[idx])
 
             # Save ramp flow and queue histories
