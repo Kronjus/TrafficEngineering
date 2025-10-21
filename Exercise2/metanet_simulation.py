@@ -1,0 +1,741 @@
+"""METANET macroscopic traffic flow simulation.
+
+This module provides a METANET implementation that mirrors the functionality
+and API of the CTM simulation, supporting:
+
+* Arbitrary numbers of cells with heterogeneous lane counts and parameters.
+* A single upstream boundary condition and a downstream sink.
+* Optional on-ramps that merge into any interior cell with configurable
+  arrival demand, metering rate and merge priority.
+* Speed dynamics with relaxation, anticipation, and convection terms.
+
+The implementation focuses on clarity and pedagogical value while providing
+a complete METANET simulation framework compatible with the existing CTM API.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
+
+# Reuse the profile types and helper from CTM
+from ctm_simulation import (
+    Profile,
+    _get_profile_value,
+    SimulationResult,
+)
+
+NumberLike = Union[float, int]
+
+
+@dataclass(frozen=True)
+class METANETCellConfig:
+    """Configuration parameters for a single METANET cell.
+
+    Each field documents its physical meaning and expected units/constraints:
+
+    - name: Human-readable cell identifier (string).
+    - length_km: Cell length in kilometres (must be > 0).
+    - lanes: Number of traffic lanes in the cell (integer, must be > 0).
+    - free_flow_speed_kmh: Free-flow speed v_f in km/h (must be > 0).
+    - jam_density_veh_per_km_per_lane: Jam density ρ_jam per lane in veh/km (must be > 0).
+    - tau_s: Relaxation time τ in seconds (must be > 0), typically 10-30s.
+    - eta: Anticipation coefficient η (dimensionless, must be >= 0), typically small.
+    - kappa: Regularization constant κ (veh/km/lane, must be > 0), small positive value.
+    - capacity_veh_per_hour_per_lane: Per-lane capacity in veh/h (must be > 0).
+    - initial_density_veh_per_km_per_lane: Initial density per lane in veh/km (>= 0).
+    - initial_speed_kmh: Initial speed in km/h (>= 0, <= free_flow_speed_kmh).
+
+    Notes
+    -----
+    Validation is performed in ``__post_init__`` to catch common configuration
+    mistakes early. The dataclass is frozen to make instances immutable.
+    """
+
+    name: str
+    length_km: float
+    lanes: int
+    free_flow_speed_kmh: float
+    jam_density_veh_per_km_per_lane: float
+    tau_s: float = 18.0  # Relaxation time in seconds
+    eta: float = 60.0  # Anticipation coefficient (km²/h)
+    kappa: float = 40.0  # Regularization constant (veh/km/lane)
+    capacity_veh_per_hour_per_lane: float = 2200.0
+    initial_density_veh_per_km_per_lane: float = 0.0
+    initial_speed_kmh: float = 0.0  # Will be set to V(rho) if 0
+
+    def __post_init__(self) -> None:
+        # Ensure lane count is positive
+        if self.lanes <= 0:
+            raise ValueError("Number of lanes must be positive.")
+
+        # Validate geometric and fundamental parameters
+        for attr_name, attr_val in [
+            ("length_km", self.length_km),
+            ("free_flow_speed_kmh", self.free_flow_speed_kmh),
+            ("jam_density_veh_per_km_per_lane", self.jam_density_veh_per_km_per_lane),
+            ("tau_s", self.tau_s),
+            ("kappa", self.kappa),
+            ("capacity_veh_per_hour_per_lane", self.capacity_veh_per_hour_per_lane),
+        ]:
+            if attr_val <= 0:
+                raise ValueError(f"{attr_name} must be positive.")
+
+        # Eta and initial values must be non-negative
+        if self.eta < 0:
+            raise ValueError("eta must be non-negative.")
+        if self.initial_density_veh_per_km_per_lane < 0:
+            raise ValueError("Initial density cannot be negative.")
+        if self.initial_speed_kmh < 0:
+            raise ValueError("Initial speed cannot be negative.")
+        if self.initial_speed_kmh > self.free_flow_speed_kmh:
+            raise ValueError("Initial speed cannot exceed free flow speed.")
+
+
+@dataclass
+class METANETOnRampConfig:
+    """Configuration for an on-ramp merging into a mainline cell.
+
+    This dataclass holds both static configuration and runtime state.
+
+    Fields
+    ------
+    target_cell : Union[int, str]
+        Index or name of the mainline cell this ramp connects to.
+    arrival_rate_profile : Profile
+        Arrival demand profile (veh/h).
+    meter_rate_veh_per_hour : Optional[float]
+        Optional ramp metering rate (veh/h). If None, the ramp is unmetered.
+    mainline_priority : float
+        Fraction in [0, 1] giving priority share to mainline when merging.
+    initial_queue_veh : float
+        Initial queued vehicles on the ramp (veh).
+    name : Optional[str]
+        Optional human-readable identifier for the ramp.
+    queue_veh : float
+        Runtime queue size (veh). Initialized from initial_queue_veh.
+    """
+
+    target_cell: Union[int, str]
+    arrival_rate_profile: Profile
+    meter_rate_veh_per_hour: Optional[float] = None
+    mainline_priority: float = 0.5
+    initial_queue_veh: float = 0.0
+    name: Optional[str] = None
+
+    # Runtime state
+    queue_veh: float = field(init=False)
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.mainline_priority <= 1:
+            raise ValueError("mainline_priority must be within [0, 1].")
+        if self.meter_rate_veh_per_hour is not None and self.meter_rate_veh_per_hour < 0:
+            raise ValueError("meter_rate_veh_per_hour cannot be negative.")
+        if self.initial_queue_veh < 0:
+            raise ValueError("initial_queue_veh cannot be negative.")
+        self.queue_veh = float(self.initial_queue_veh)
+
+
+def greenshields_speed(
+    density: float,
+    free_flow_speed_kmh: float,
+    jam_density: float,
+) -> float:
+    """Compute equilibrium speed using Greenshields' linear model.
+
+    V(ρ) = v_f * (1 - ρ / ρ_jam)
+
+    Parameters
+    ----------
+    density : float
+        Current density in veh/km/lane.
+    free_flow_speed_kmh : float
+        Free-flow speed in km/h.
+    jam_density : float
+        Jam density in veh/km/lane.
+
+    Returns
+    -------
+    float
+        Equilibrium speed in km/h, clamped to [0, v_f].
+    """
+    if jam_density <= 0:
+        return free_flow_speed_kmh
+    ratio = min(1.0, max(0.0, density / jam_density))
+    return free_flow_speed_kmh * (1.0 - ratio)
+
+
+class METANETSimulation:
+    """METANET macroscopic traffic flow simulator.
+
+    This class implements a discrete-time METANET model with:
+    * heterogeneous cells (length, lanes, model parameters),
+    * a single upstream demand boundary and optional downstream supply,
+    * optional on-ramps with queueing and metering,
+    * speed dynamics with relaxation, convection, and anticipation terms.
+
+    Public methods:
+    * __init__: configure the simulation instance.
+    * run: execute the time-stepping loop and return a SimulationResult.
+
+    The API mirrors the CTM simulation for easy interchangeability.
+    """
+
+    def __init__(
+        self,
+        cells: Sequence[METANETCellConfig],
+        time_step_hours: float,
+        upstream_demand_profile: Profile,
+        downstream_supply_profile: Optional[Profile] = None,
+        on_ramps: Optional[Sequence[METANETOnRampConfig]] = None,
+        equilibrium_speed_func: Optional[Callable[[float, float, float], float]] = None,
+    ) -> None:
+        """Construct a METANETSimulation.
+
+        Parameters
+        ----------
+        cells:
+            Sequence of METANETCellConfig objects describing the mainline.
+        time_step_hours:
+            Simulation time step in hours (must be positive).
+        upstream_demand_profile:
+            Profile providing upstream arrival demand (veh/h).
+        downstream_supply_profile:
+            Optional profile constraining downstream discharge flow.
+        on_ramps:
+            Optional sequence of METANETOnRampConfig.
+        equilibrium_speed_func:
+            Optional function V(rho, v_f, rho_jam) -> speed_kmh.
+            Defaults to Greenshields' model if not provided.
+
+        Raises
+        ------
+        ValueError
+            If time_step_hours is not positive or cells is empty.
+        """
+        if time_step_hours <= 0:
+            raise ValueError("time_step_hours must be positive.")
+        if not cells:
+            raise ValueError("At least one cell configuration is required.")
+
+        self.cells: List[METANETCellConfig] = list(cells)
+        self.dt = float(time_step_hours)
+        self.upstream_profile = upstream_demand_profile
+        self.downstream_profile = downstream_supply_profile
+
+        # Set equilibrium speed function
+        self.equilibrium_speed = equilibrium_speed_func or greenshields_speed
+
+        # Map cell names to indices
+        self._cell_index: Dict[str, int] = {
+            cell.name: idx for idx, cell in enumerate(self.cells)
+        }
+
+        # Normalize and store on-ramps
+        self.on_ramps: List[METANETOnRampConfig] = []
+        if on_ramps:
+            for ramp in on_ramps:
+                target_index = self._resolve_target_index(ramp.target_cell)
+                object.__setattr__(ramp, "target_cell", target_index)
+                ramp_name = ramp.name or f"ramp_{target_index}"
+                object.__setattr__(ramp, "name", ramp_name)
+                self.on_ramps.append(ramp)
+
+        # Build lookup from cell index -> ramp config
+        self._ramps_by_cell: Dict[int, METANETOnRampConfig] = {}
+        for ramp in self.on_ramps:
+            target_index = int(ramp.target_cell)
+            if target_index in self._ramps_by_cell:
+                raise ValueError(
+                    "Only one on-ramp per target cell is supported."
+                )
+            self._ramps_by_cell[target_index] = ramp
+
+    def _resolve_target_index(self, target: Union[int, str]) -> int:
+        """Resolve an on-ramp target to an integer index."""
+        if isinstance(target, int):
+            if not 0 <= target < len(self.cells):
+                raise IndexError("On-ramp target cell index out of range.")
+            return target
+        if target not in self._cell_index:
+            raise KeyError(f"Unknown cell name '{target}'.")
+        return self._cell_index[target]
+
+    def run(self, steps: int) -> SimulationResult:
+        """Run the METANET simulation for the requested number of time steps.
+
+        Parameters
+        ----------
+        steps
+            Number of discrete simulation steps to execute (must be positive).
+
+        Returns
+        -------
+        SimulationResult
+            Container with time series for densities, flows, speeds, and ramp data.
+        """
+        if steps <= 0:
+            raise ValueError("steps must be a positive integer.")
+
+        # Initialize densities and speeds
+        densities = [
+            cell.initial_density_veh_per_km_per_lane for cell in self.cells
+        ]
+        speeds = []
+        for idx, cell in enumerate(self.cells):
+            if cell.initial_speed_kmh > 0:
+                speeds.append(cell.initial_speed_kmh)
+            else:
+                # Initialize speed to equilibrium speed at initial density
+                v_eq = self.equilibrium_speed(
+                    densities[idx],
+                    cell.free_flow_speed_kmh,
+                    cell.jam_density_veh_per_km_per_lane,
+                )
+                speeds.append(max(1.0, v_eq))  # Ensure non-zero initial speed
+
+        # Initialize history containers
+        density_history: Dict[str, List[float]] = {
+            cell.name: [density] for cell, density in zip(self.cells, densities)
+        }
+        flow_history: Dict[str, List[float]] = {cell.name: [] for cell in self.cells}
+        ramp_queue_history: Dict[str, List[float]] = {
+            ramp.name: [ramp.queue_veh] for ramp in self.on_ramps
+        }
+        ramp_flow_history: Dict[str, List[float]] = {
+            ramp.name: [] for ramp in self.on_ramps
+        }
+
+        # Main time-stepping loop
+        for step in range(steps):
+            # Update on-ramp queues and get potential ramp flows
+            ramp_potentials = self._update_ramp_queues(step)
+            ramp_flows_step: Dict[str, float] = {
+                ramp.name: 0.0 for ramp in self.on_ramps
+            }
+
+            # Evaluate upstream demand and downstream supply
+            upstream_demand = _get_profile_value(
+                self.upstream_profile, step, self.dt
+            )
+            last_cell = self.cells[-1]
+            max_downstream_flow = (
+                last_cell.capacity_veh_per_hour_per_lane * last_cell.lanes
+            )
+            downstream_supply_raw = (
+                _get_profile_value(self.downstream_profile, step, self.dt)
+                if self.downstream_profile is not None
+                else max_downstream_flow
+            )
+            downstream_supply = max(0.0, min(downstream_supply_raw, max_downstream_flow))
+
+            # Prepare inflow/outflow accumulators
+            inflows = [0.0] * len(self.cells)
+            outflows = [0.0] * len(self.cells)
+
+            # Compute flows into each cell
+            for idx in range(len(self.cells)):
+                # Receiving capacity based on available space
+                receiving = self._compute_receiving(densities[idx], self.cells[idx])
+                
+                # Demand from upstream (either boundary or previous cell)
+                if idx == 0:
+                    mainline_demand = upstream_demand
+                else:
+                    # Flow from previous cell = min(sending, previous receiving)
+                    mainline_demand = densities[idx-1] * speeds[idx-1] * self.cells[idx-1].lanes
+                    mainline_demand = min(mainline_demand, self.cells[idx-1].capacity_veh_per_hour_per_lane * self.cells[idx-1].lanes)
+                
+                ramp_flow = 0.0
+                ramp = self._ramps_by_cell.get(idx)
+                if ramp is not None:
+                    # Merge mainline and ramp
+                    potential = ramp_potentials[ramp.name]
+                    main_flow, ramp_flow = self._merge_flows(
+                        mainline_demand,
+                        potential,
+                        receiving,
+                        ramp.mainline_priority,
+                    )
+                    # Dequeue ramp vehicles
+                    ramp.queue_veh = max(0.0, ramp.queue_veh - ramp_flow * self.dt)
+                    ramp_flows_step[ramp.name] = ramp_flow
+                else:
+                    main_flow = min(mainline_demand, receiving)
+
+                inflow = main_flow + ramp_flow
+                inflows[idx] = inflow
+
+                if idx > 0:
+                    outflows[idx - 1] = main_flow
+
+            # Handle flow out of the last cell
+            last_idx = len(self.cells) - 1
+            last_flow = densities[last_idx] * speeds[last_idx] * self.cells[last_idx].lanes
+            last_flow = min(last_flow, self.cells[last_idx].capacity_veh_per_hour_per_lane * self.cells[last_idx].lanes)
+            outflow_last = min(last_flow, downstream_supply)
+            outflows[last_idx] = outflow_last
+
+            # Record flows for all cells
+            for idx in range(len(self.cells)):
+                flow_history[self.cells[idx].name].append(outflows[idx])
+
+            # Save ramp flow and queue histories
+            for ramp in self.on_ramps:
+                ramp_flow_history[ramp.name].append(ramp_flows_step[ramp.name])
+                ramp_queue_history[ramp.name].append(ramp.queue_veh)
+
+            # Update densities and speeds using METANET dynamics
+            new_densities, new_speeds = self._update_state(
+                densities, speeds, inflows, outflows
+            )
+            densities = new_densities
+            speeds = new_speeds
+
+            # Record new state
+            for idx, cell in enumerate(self.cells):
+                density_history[cell.name].append(densities[idx])
+
+        # Return results using the shared SimulationResult container
+        return SimulationResult(
+            densities=density_history,
+            flows=flow_history,
+            ramp_queues=ramp_queue_history,
+            ramp_flows=ramp_flow_history,
+            time_step_hours=self.dt,
+        )
+
+    def _compute_flows(
+        self, densities: Sequence[float], speeds: Sequence[float]
+    ) -> List[float]:
+        """Compute flows q_i = rho_i * v_i * lanes for each cell."""
+        flows = []
+        for idx, (rho, v, cell) in enumerate(zip(densities, speeds, self.cells)):
+            flow = rho * v * cell.lanes  # veh/km/lane * km/h * lanes = veh/h
+            flows.append(max(0.0, flow))
+        return flows
+
+    def _compute_receiving(self, density: float, cell: METANETCellConfig) -> float:
+        """Compute receiving capacity based on available space.
+
+        Similar to CTM receiving: capacity based on available headroom.
+        """
+        total_capacity = cell.capacity_veh_per_hour_per_lane * cell.lanes
+        # Use a backward wave speed approximation (conservative)
+        congestion_wave_speed_kmh = 20.0  # Typical value
+        remaining_density = max(0.0, cell.jam_density_veh_per_km_per_lane - density)
+        supply = congestion_wave_speed_kmh * remaining_density * cell.lanes
+        return min(supply, total_capacity)
+
+    def _update_ramp_queues(self, step: int) -> Dict[str, float]:
+        """Advance on-ramp queues by arrivals and compute ramp potential."""
+        potentials: Dict[str, float] = {}
+        for ramp in self.on_ramps:
+            arrivals = _get_profile_value(ramp.arrival_rate_profile, step, self.dt)
+            ramp.queue_veh += arrivals * self.dt
+            meter_rate = ramp.meter_rate_veh_per_hour
+            potential = ramp.queue_veh / self.dt
+            if meter_rate is not None:
+                potential = min(potential, meter_rate)
+            potentials[ramp.name] = max(0.0, potential)
+        return potentials
+
+    def _merge_flows(
+        self,
+        mainline_demand: float,
+        ramp_demand: float,
+        supply: float,
+        mainline_priority: float,
+    ) -> Tuple[float, float]:
+        """Merge mainline and ramp demands into available supply.
+
+        Uses the same priority-based merging logic as CTM.
+        """
+        if supply <= 0:
+            return 0.0, 0.0
+
+        mainline_demand = max(0.0, mainline_demand)
+        ramp_demand = max(0.0, ramp_demand)
+
+        if mainline_demand + ramp_demand <= supply:
+            return mainline_demand, ramp_demand
+
+        mainline_share = mainline_priority
+        ramp_share = 1.0 - mainline_share
+
+        main_flow = min(mainline_demand, mainline_share * supply)
+        ramp_flow = min(ramp_demand, ramp_share * supply)
+
+        remaining_supply = supply - main_flow - ramp_flow
+        remaining_main_demand = max(0.0, mainline_demand - main_flow)
+        remaining_ramp_demand = max(0.0, ramp_demand - ramp_flow)
+
+        if remaining_supply > 0:
+            total_remaining_demand = remaining_main_demand + remaining_ramp_demand
+            if total_remaining_demand > 0:
+                additional_main = remaining_supply * (
+                    remaining_main_demand / total_remaining_demand
+                )
+                additional_ramp = remaining_supply - additional_main
+                main_flow += min(additional_main, remaining_main_demand)
+                ramp_flow += min(additional_ramp, remaining_ramp_demand)
+
+        return main_flow, ramp_flow
+
+    def _update_state(
+        self,
+        densities: Sequence[float],
+        speeds: Sequence[float],
+        inflows: Sequence[float],
+        outflows: Sequence[float],
+    ) -> Tuple[List[float], List[float]]:
+        """Update densities and speeds using METANET dynamics.
+
+        METANET equations:
+        - Density: rho_i[k+1] = rho_i[k] + (T/L_i) * (q_{i-1}[k] - q_i[k] + r_i[k])
+        - Speed: v_i[k+1] = v_i[k] + T * (
+            (V(rho_i) - v_i) / tau
+            - (v_i / L_i) * (v_i - v_{i-1})
+            - (eta / tau) * (rho_{i+1} - rho_i) / (rho_i + kappa)
+          )
+        """
+        new_densities = []
+        new_speeds = []
+
+        for idx, cell in enumerate(self.cells):
+            # Update density (conservation of vehicles)
+            inflow = inflows[idx]
+            outflow = outflows[idx]
+            change = (self.dt / cell.length_km) * (
+                inflow / cell.lanes - outflow / cell.lanes
+            )
+            new_rho = densities[idx] + change
+            new_rho = max(0.0, min(new_rho, cell.jam_density_veh_per_km_per_lane))
+
+            # Update speed (METANET speed dynamics)
+            # Use current (not new) density for speed update
+            rho = max(densities[idx], 0.1)  # Avoid division issues at zero density
+            v = speeds[idx]
+
+            # Equilibrium speed term
+            v_eq = self.equilibrium_speed(
+                densities[idx], cell.free_flow_speed_kmh, cell.jam_density_veh_per_km_per_lane
+            )
+            tau_hours = cell.tau_s / 3600.0  # Convert tau from seconds to hours
+            relaxation_term = (v_eq - v) / tau_hours
+
+            # Convection term (only if there's upstream flow)
+            if idx > 0 and v > 0:
+                v_upstream = speeds[idx - 1]
+                convection_term = -(v / cell.length_km) * (v - v_upstream)
+            else:
+                convection_term = 0.0
+
+            # Anticipation term
+            if idx < len(self.cells) - 1:
+                rho_downstream = densities[idx + 1]
+                # eta is in km²/h, convert to proper units
+                eta_hours = cell.eta  # Already in km²/h
+                anticipation_term = -(eta_hours / tau_hours) * (
+                    (rho_downstream - densities[idx]) / (rho + cell.kappa)
+                )
+            else:
+                anticipation_term = 0.0
+
+            # Speed update with bounds checking
+            dv = self.dt * (relaxation_term + convection_term + anticipation_term)
+            new_v = v + dv
+            new_v = max(0.0, min(new_v, cell.free_flow_speed_kmh))
+            
+            # If density is very low, reset speed to equilibrium
+            if new_rho < 1.0:
+                new_v = self.equilibrium_speed(
+                    new_rho, cell.free_flow_speed_kmh, cell.jam_density_veh_per_km_per_lane
+                )
+
+            new_densities.append(new_rho)
+            new_speeds.append(new_v)
+
+        return new_densities, new_speeds
+
+
+def build_uniform_metanet_mainline(
+    *,
+    num_cells: int,
+    cell_length_km: float,
+    lanes: Union[int, Sequence[int]],
+    free_flow_speed_kmh: float,
+    jam_density_veh_per_km_per_lane: float,
+    tau_s: float = 18.0,
+    eta: float = 60.0,
+    kappa: float = 40.0,
+    capacity_veh_per_hour_per_lane: float = 2200.0,
+    initial_density_veh_per_km_per_lane: Union[float, Sequence[float]] = 0.0,
+    initial_speed_kmh: Union[float, Sequence[float]] = 0.0,
+) -> List[METANETCellConfig]:
+    """Create a list of METANETCellConfig objects representing a uniform mainline.
+
+    This helper constructs num_cells mainline cells using the provided METANET
+    parameters. It accepts either scalar or sequence values for lanes, initial
+    density, and initial speed.
+
+    Parameters
+    ----------
+    num_cells:
+        Number of mainline cells to create. Must be positive.
+    cell_length_km:
+        Length of each cell in kilometres.
+    lanes:
+        Either a single integer or sequence with one integer per cell.
+    free_flow_speed_kmh:
+        Free flow speed (km/h) applied to all cells.
+    jam_density_veh_per_km_per_lane:
+        Per-lane jam density (veh/km/lane) applied to all cells.
+    tau_s:
+        Relaxation time in seconds (default: 18.0).
+    eta:
+        Anticipation coefficient in km²/h (default: 60.0).
+    kappa:
+        Regularization constant in veh/km/lane (default: 40.0).
+    capacity_veh_per_hour_per_lane:
+        Per-lane capacity (veh/h/lane, default: 2200.0).
+    initial_density_veh_per_km_per_lane:
+        Initial density per lane (scalar or sequence).
+    initial_speed_kmh:
+        Initial speed in km/h (scalar or sequence). If 0, uses V(rho).
+
+    Returns
+    -------
+    List[METANETCellConfig]
+        Configured METANET cells.
+
+    Raises
+    ------
+    ValueError
+        If num_cells is not positive or sequence lengths don't match.
+    """
+    if num_cells <= 0:
+        raise ValueError("num_cells must be positive.")
+
+    # Normalize lanes
+    if isinstance(lanes, int):
+        lane_profile = [lanes] * num_cells
+    else:
+        lane_profile = list(lanes)
+        if len(lane_profile) != num_cells:
+            raise ValueError("lanes sequence must match num_cells.")
+
+    # Normalize initial densities
+    if isinstance(initial_density_veh_per_km_per_lane, (int, float)):
+        density_profile = [float(initial_density_veh_per_km_per_lane)] * num_cells
+    else:
+        density_profile = [float(v) for v in initial_density_veh_per_km_per_lane]
+        if len(density_profile) != num_cells:
+            raise ValueError("initial_density sequence must match num_cells.")
+
+    # Normalize initial speeds
+    if isinstance(initial_speed_kmh, (int, float)):
+        speed_profile = [float(initial_speed_kmh)] * num_cells
+    else:
+        speed_profile = [float(v) for v in initial_speed_kmh]
+        if len(speed_profile) != num_cells:
+            raise ValueError("initial_speed sequence must match num_cells.")
+
+    # Construct cells
+    cells: List[METANETCellConfig] = []
+    for idx in range(num_cells):
+        cells.append(
+            METANETCellConfig(
+                name=f"cell_{idx}",
+                length_km=cell_length_km,
+                lanes=lane_profile[idx],
+                free_flow_speed_kmh=free_flow_speed_kmh,
+                jam_density_veh_per_km_per_lane=jam_density_veh_per_km_per_lane,
+                tau_s=tau_s,
+                eta=eta,
+                kappa=kappa,
+                capacity_veh_per_hour_per_lane=capacity_veh_per_hour_per_lane,
+                initial_density_veh_per_km_per_lane=density_profile[idx],
+                initial_speed_kmh=speed_profile[idx],
+            )
+        )
+    return cells
+
+
+def run_basic_metanet_scenario(steps: int = 20) -> SimulationResult:
+    """Run a small METANET demonstration scenario.
+
+    This scenario mirrors the CTM basic scenario to allow comparison.
+    """
+
+    def triangular_profile(step: int) -> float:
+        peak = 1800.0
+        if step < 5:
+            return peak * (step / 5)
+        if step < 10:
+            return peak
+        return max(0.0, peak - 200.0 * (step - 10))
+
+    cells = build_uniform_metanet_mainline(
+        num_cells=3,
+        cell_length_km=0.5,
+        lanes=[3, 3, 2],
+        free_flow_speed_kmh=100.0,
+        jam_density_veh_per_km_per_lane=160.0,
+        tau_s=18.0,
+        eta=60.0,
+        kappa=40.0,
+        capacity_veh_per_hour_per_lane=2200.0,
+        initial_density_veh_per_km_per_lane=[20.0, 25.0, 30.0],
+    )
+
+    on_ramp = METANETOnRampConfig(
+        target_cell=1,
+        arrival_rate_profile=[300.0] * steps,
+        meter_rate_veh_per_hour=600.0,
+        mainline_priority=0.6,
+        initial_queue_veh=10.0,
+        name="demo_ramp",
+    )
+
+    sim = METANETSimulation(
+        cells=cells,
+        time_step_hours=0.1,
+        upstream_demand_profile=triangular_profile,
+        downstream_supply_profile=2000.0,
+        on_ramps=[on_ramp],
+    )
+    return sim.run(steps)
+
+
+__all__ = [
+    "METANETSimulation",
+    "METANETCellConfig",
+    "METANETOnRampConfig",
+    "SimulationResult",
+    "build_uniform_metanet_mainline",
+    "run_basic_metanet_scenario",
+    "greenshields_speed",
+]
+
+
+if __name__ == "__main__":  # pragma: no cover - convenience usage
+    result = run_basic_metanet_scenario(steps=20)
+    try:
+        df = result.to_dataframe()
+    except RuntimeError:
+        from pprint import pprint
+
+        print("pandas not installed - printing raw dictionaries instead\n")
+        pprint(
+            {
+                "time_hours": result.time_vector(),
+                "densities": result.densities,
+                "flows": result.flows,
+                "ramp_queues": result.ramp_queues,
+                "ramp_flows": result.ramp_flows,
+            }
+        )
+    else:
+        print(df.head())
