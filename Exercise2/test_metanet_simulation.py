@@ -1082,6 +1082,146 @@ class TestMETANETALINEAControl(unittest.TestCase):
         # Should default to target_cell (1)
         self.assertEqual(ramp.alinea_measurement_cell, 1)
 
+    def test_alinea_with_invalid_slew_limit(self):
+        """Test that ALINEA rejects non-positive slew limit."""
+        with self.assertRaises(ValueError):
+            METANETOnRampConfig(
+                target_cell=0,
+                arrival_rate_profile=400.0,
+                meter_rate_veh_per_hour=600.0,
+                alinea_enabled=True,
+                alinea_slew_limit=0.0,  # Must be positive
+            )
+        
+        with self.assertRaises(ValueError):
+            METANETOnRampConfig(
+                target_cell=0,
+                arrival_rate_profile=400.0,
+                meter_rate_veh_per_hour=600.0,
+                alinea_enabled=True,
+                alinea_slew_limit=-100.0,  # Must be positive
+            )
+
+    def test_alinea_slew_limit_constrains_rate_change(self):
+        """Test that slew limit constrains rate of change."""
+        cells = build_uniform_metanet_mainline(
+            num_cells=3,
+            cell_length_km=0.5,
+            lanes=3,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            initial_density_veh_per_km_per_lane=140.0,  # Very high
+        )
+
+        # With high density and low target, controller wants large decrease
+        ramp = METANETOnRampConfig(
+            target_cell=1,
+            arrival_rate_profile=800.0,
+            meter_rate_veh_per_hour=1000.0,
+            alinea_enabled=True,
+            alinea_gain=200.0,
+            alinea_target_density=40.0,
+            alinea_min_rate=200.0,
+            alinea_max_rate=1500.0,
+            alinea_slew_limit=500.0,  # Limit: 500 veh/h²
+        )
+
+        sim = METANETSimulation(
+            cells=cells,
+            time_step_hours=0.05,
+            upstream_demand_profile=3000.0,
+            on_ramps=[ramp],
+        )
+
+        initial_rate = ramp.meter_rate_veh_per_hour
+        result = sim.run(steps=2)
+        
+        # max_delta per step = 500 * 0.05 = 25 veh/h
+        final_rate = ramp.meter_rate_veh_per_hour
+        rate_change = abs(final_rate - initial_rate)
+        
+        # Total change should be at most 2 * 25 = 50 veh/h
+        max_allowed_change = ramp.alinea_slew_limit * sim.dt * 2
+        self.assertLessEqual(rate_change, max_allowed_change + 1.0)
+
+    def test_alinea_slew_limit_none_allows_unbounded_change(self):
+        """Test that slew_limit=None allows unbounded rate changes."""
+        cells = build_uniform_metanet_mainline(
+            num_cells=2,
+            cell_length_km=0.5,
+            lanes=3,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            initial_density_veh_per_km_per_lane=140.0,
+        )
+
+        ramp = METANETOnRampConfig(
+            target_cell=0,
+            arrival_rate_profile=300.0,
+            meter_rate_veh_per_hour=1200.0,
+            alinea_enabled=True,
+            alinea_gain=500.0,
+            alinea_target_density=40.0,
+            alinea_min_rate=200.0,
+            alinea_max_rate=1500.0,
+            alinea_slew_limit=None,  # No limit
+        )
+
+        sim = METANETSimulation(
+            cells=cells,
+            time_step_hours=0.05,
+            upstream_demand_profile=500.0,
+            on_ramps=[ramp],
+        )
+
+        initial_rate = ramp.meter_rate_veh_per_hour
+        result = sim.run(steps=1)
+        
+        # Rate should drop significantly without slew limit
+        # Should be clamped to min_rate
+        self.assertAlmostEqual(ramp.meter_rate_veh_per_hour, ramp.alinea_min_rate, places=1)
+
+    def test_alinea_slew_limit_symmetric(self):
+        """Test that slew limit applies to both increases and decreases."""
+        cells = build_uniform_metanet_mainline(
+            num_cells=2,
+            cell_length_km=0.5,
+            lanes=3,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            initial_density_veh_per_km_per_lane=25.0,  # Very low
+        )
+
+        ramp = METANETOnRampConfig(
+            target_cell=0,
+            arrival_rate_profile=800.0,
+            meter_rate_veh_per_hour=300.0,
+            alinea_enabled=True,
+            alinea_gain=200.0,
+            alinea_target_density=110.0,
+            alinea_min_rate=200.0,
+            alinea_max_rate=1500.0,
+            alinea_slew_limit=400.0,  # Limit: 400 veh/h²
+        )
+
+        sim = METANETSimulation(
+            cells=cells,
+            time_step_hours=0.1,
+            upstream_demand_profile=500.0,
+            on_ramps=[ramp],
+        )
+
+        initial_rate = ramp.meter_rate_veh_per_hour
+        result = sim.run(steps=2)
+        
+        # max_delta per step = 400 * 0.1 = 40 veh/h
+        final_rate = ramp.meter_rate_veh_per_hour
+        rate_increase = final_rate - initial_rate
+        
+        max_allowed_increase = ramp.alinea_slew_limit * sim.dt * 2
+        self.assertLessEqual(rate_increase, max_allowed_increase + 1.0)
+        self.assertGreater(rate_increase, 0)
+
 
 class TestALINEAAutoTuning(unittest.TestCase):
     """Test ALINEA automatic gain tuning functionality."""

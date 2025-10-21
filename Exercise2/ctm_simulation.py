@@ -243,6 +243,10 @@ class OnRampConfig:
         Minimum metering rate (veh/h) for ALINEA control. Default: 240.0.
     alinea_max_rate : float
         Maximum metering rate (veh/h) for ALINEA control. Default: 2400.0.
+    alinea_slew_limit : Optional[float]
+        Maximum rate of change of metering rate per hour (veh/h²). If None,
+        no slew rate limiting is applied. This constrains how quickly the
+        metering rate can change between time steps. Default: None.
     queue_veh : float
         Runtime queue size (veh). Marked ``init=False`` and initialised in
         ``__post_init__`` from ``initial_queue_veh``.
@@ -259,6 +263,7 @@ class OnRampConfig:
     alinea_target_density: Optional[float] = None
     alinea_min_rate: float = 240.0
     alinea_max_rate: float = 2400.0
+    alinea_slew_limit: Optional[float] = None
 
     # Runtime state: current queue size in vehicles. Not provided by caller.
     queue_veh: float = field(init=False)
@@ -294,6 +299,8 @@ class OnRampConfig:
                 )
             if self.alinea_target_density is not None and self.alinea_target_density <= 0:
                 raise ValueError("alinea_target_density must be positive.")
+            if self.alinea_slew_limit is not None and self.alinea_slew_limit <= 0:
+                raise ValueError("alinea_slew_limit must be positive.")
 
         # Initialise the runtime queue as a float copy of the configured initial queue.
         self.queue_veh = float(self.initial_queue_veh)
@@ -549,6 +556,7 @@ class CTMSimulation:
         ALINEA algorithm: r(k+1) = r(k) + K_R * (ρ_target - ρ_measured)
         
         The measured density is taken from the target cell where the ramp merges.
+        Optional slew rate limiting constrains how quickly the rate can change.
         
         Parameters
         ----------
@@ -574,6 +582,16 @@ class CTMSimulation:
             
             # Clamp to min/max bounds
             new_rate = max(ramp.alinea_min_rate, min(new_rate, ramp.alinea_max_rate))
+            
+            # Apply slew rate limiting if configured
+            if ramp.alinea_slew_limit is not None:
+                # Slew limit is in (veh/h²), dt is in hours
+                # Maximum allowed change in this time step = slew_limit * dt (veh/h)
+                max_delta = ramp.alinea_slew_limit * self.dt
+                delta = new_rate - current_rate
+                # Clamp delta to [-max_delta, +max_delta]
+                delta = max(min(delta, max_delta), -max_delta)
+                new_rate = current_rate + delta
             
             # Update the ramp's metering rate
             object.__setattr__(ramp, "meter_rate_veh_per_hour", new_rate)
