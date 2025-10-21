@@ -1083,5 +1083,298 @@ class TestMETANETALINEAControl(unittest.TestCase):
         self.assertEqual(ramp.alinea_measurement_cell, 1)
 
 
+class TestALINEAAutoTuning(unittest.TestCase):
+    """Test ALINEA automatic gain tuning functionality."""
+
+    def test_auto_tune_basic(self):
+        """Test basic auto-tuning with a simple simulator."""
+        cells = build_uniform_metanet_mainline(
+            num_cells=3,
+            cell_length_km=0.5,
+            lanes=3,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            initial_density_veh_per_km_per_lane=50.0,
+        )
+
+        ramp = METANETOnRampConfig(
+            target_cell=1,
+            arrival_rate_profile=600.0,
+            meter_rate_veh_per_hour=700.0,
+            alinea_enabled=True,
+            alinea_gain=10.0,  # Initial guess
+            alinea_target_density=60.0,
+        )
+
+        sim = METANETSimulation(
+            cells=cells,
+            time_step_hours=0.1,
+            upstream_demand_profile=1500.0,
+            on_ramps=[ramp],
+        )
+
+        # Simple simulator that returns better scores for K near 50
+        def mock_simulator(K: float) -> dict:
+            # Quadratic objective centered at K=50
+            optimal_K = 50.0
+            rmse = abs(K - optimal_K) ** 2
+            return {'rmse': rmse, 'delay': rmse * 2}
+
+        # Run auto-tuning
+        tuner_params = {
+            'K_min': 10.0,
+            'K_max': 90.0,
+            'n_grid': 10,
+            'objective': 'rmse',
+            'verbose': False,
+        }
+
+        best_K = sim.auto_tune_alinea_gain(
+            ramp_index=0,
+            simulator_fn=mock_simulator,
+            tuner_params=tuner_params,
+        )
+
+        # Best K should be close to 50
+        self.assertGreater(best_K, 40.0)
+        self.assertLess(best_K, 60.0)
+        
+        # Ramp gain should be updated
+        self.assertEqual(ramp.alinea_gain, best_K)
+
+    def test_auto_tune_invalid_ramp_index(self):
+        """Test that auto-tuning raises error for invalid ramp index."""
+        cells = build_uniform_metanet_mainline(
+            num_cells=2,
+            cell_length_km=0.5,
+            lanes=3,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+        )
+
+        sim = METANETSimulation(
+            cells=cells,
+            time_step_hours=0.1,
+            upstream_demand_profile=1000.0,
+        )
+
+        def mock_simulator(K: float) -> dict:
+            return {'rmse': K}
+
+        with self.assertRaises(ValueError):
+            sim.auto_tune_alinea_gain(
+                ramp_index=5,  # Out of range
+                simulator_fn=mock_simulator,
+            )
+
+    def test_auto_tune_non_alinea_ramp(self):
+        """Test that auto-tuning raises error for non-ALINEA ramp."""
+        cells = build_uniform_metanet_mainline(
+            num_cells=2,
+            cell_length_km=0.5,
+            lanes=3,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+        )
+
+        ramp = METANETOnRampConfig(
+            target_cell=1,
+            arrival_rate_profile=500.0,
+            meter_rate_veh_per_hour=700.0,
+            alinea_enabled=False,  # ALINEA not enabled
+        )
+
+        sim = METANETSimulation(
+            cells=cells,
+            time_step_hours=0.1,
+            upstream_demand_profile=1000.0,
+            on_ramps=[ramp],
+        )
+
+        def mock_simulator(K: float) -> dict:
+            return {'rmse': K}
+
+        with self.assertRaises(ValueError):
+            sim.auto_tune_alinea_gain(
+                ramp_index=0,
+                simulator_fn=mock_simulator,
+            )
+
+    def test_auto_tune_invalid_K_range(self):
+        """Test that auto-tuning validates K_min and K_max."""
+        cells = build_uniform_metanet_mainline(
+            num_cells=2,
+            cell_length_km=0.5,
+            lanes=3,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+        )
+
+        ramp = METANETOnRampConfig(
+            target_cell=1,
+            arrival_rate_profile=500.0,
+            meter_rate_veh_per_hour=700.0,
+            alinea_enabled=True,
+        )
+
+        sim = METANETSimulation(
+            cells=cells,
+            time_step_hours=0.1,
+            upstream_demand_profile=1000.0,
+            on_ramps=[ramp],
+        )
+
+        def mock_simulator(K: float) -> dict:
+            return {'rmse': K}
+
+        tuner_params = {
+            'K_min': 100.0,
+            'K_max': 50.0,  # Invalid: max < min
+        }
+
+        with self.assertRaises(ValueError):
+            sim.auto_tune_alinea_gain(
+                ramp_index=0,
+                simulator_fn=mock_simulator,
+                tuner_params=tuner_params,
+            )
+
+    def test_auto_tune_different_objectives(self):
+        """Test auto-tuning with different objective functions."""
+        cells = build_uniform_metanet_mainline(
+            num_cells=2,
+            cell_length_km=0.5,
+            lanes=3,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+        )
+
+        ramp = METANETOnRampConfig(
+            target_cell=1,
+            arrival_rate_profile=500.0,
+            meter_rate_veh_per_hour=700.0,
+            alinea_enabled=True,
+            alinea_gain=20.0,
+        )
+
+        sim = METANETSimulation(
+            cells=cells,
+            time_step_hours=0.1,
+            upstream_demand_profile=1000.0,
+            on_ramps=[ramp],
+        )
+
+        # Simulator with multiple metrics
+        def mock_simulator(K: float) -> dict:
+            rmse = (K - 30.0) ** 2
+            delay = (K - 40.0) ** 2
+            return {'rmse': rmse, 'delay': delay}
+
+        # Test with 'delay' objective
+        tuner_params = {
+            'K_min': 20.0,
+            'K_max': 60.0,
+            'n_grid': 10,
+            'objective': 'delay',
+        }
+
+        best_K = sim.auto_tune_alinea_gain(
+            ramp_index=0,
+            simulator_fn=mock_simulator,
+            tuner_params=tuner_params,
+        )
+
+        # Should be close to 40 (delay minimizer)
+        self.assertGreater(best_K, 30.0)
+        self.assertLess(best_K, 50.0)
+
+    def test_auto_tune_with_realistic_simulator(self):
+        """Test auto-tuning with a more realistic simulation-based objective."""
+        # Create a simple scenario
+        cells = build_uniform_metanet_mainline(
+            num_cells=3,
+            cell_length_km=0.5,
+            lanes=3,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=160.0,
+            initial_density_veh_per_km_per_lane=40.0,
+        )
+
+        ramp = METANETOnRampConfig(
+            target_cell=1,
+            arrival_rate_profile=800.0,
+            meter_rate_veh_per_hour=600.0,
+            alinea_enabled=True,
+            alinea_gain=30.0,
+            alinea_target_density=70.0,
+        )
+
+        # Create a simulator function that runs a short simulation
+        def simulation_based_objective(K: float) -> dict:
+            # Create a fresh simulation setup
+            test_cells = build_uniform_metanet_mainline(
+                num_cells=3,
+                cell_length_km=0.5,
+                lanes=3,
+                free_flow_speed_kmh=100.0,
+                jam_density_veh_per_km_per_lane=160.0,
+                initial_density_veh_per_km_per_lane=40.0,
+            )
+
+            test_ramp = METANETOnRampConfig(
+                target_cell=1,
+                arrival_rate_profile=800.0,
+                meter_rate_veh_per_hour=600.0,
+                alinea_enabled=True,
+                alinea_gain=K,  # Test this gain
+                alinea_target_density=70.0,
+            )
+
+            test_sim = METANETSimulation(
+                cells=test_cells,
+                time_step_hours=0.1,
+                upstream_demand_profile=1500.0,
+                on_ramps=[test_ramp],
+            )
+
+            # Run short simulation
+            result = test_sim.run(steps=10)
+
+            # Calculate RMSE from target density
+            target_density = 70.0
+            densities_cell1 = result.densities["cell_1"]
+            squared_errors = [(d - target_density) ** 2 for d in densities_cell1]
+            rmse = (sum(squared_errors) / len(squared_errors)) ** 0.5
+
+            return {'rmse': rmse}
+
+        sim = METANETSimulation(
+            cells=cells,
+            time_step_hours=0.1,
+            upstream_demand_profile=1500.0,
+            on_ramps=[ramp],
+        )
+
+        # Run auto-tuning with a small grid for speed
+        tuner_params = {
+            'K_min': 10.0,
+            'K_max': 80.0,
+            'n_grid': 5,
+            'objective': 'rmse',
+            'verbose': False,
+        }
+
+        best_K = sim.auto_tune_alinea_gain(
+            ramp_index=0,
+            simulator_fn=simulation_based_objective,
+            tuner_params=tuner_params,
+        )
+
+        # Just verify it completes and returns a valid gain
+        self.assertGreaterEqual(best_K, 10.0)
+        self.assertLessEqual(best_K, 80.0)
+        self.assertEqual(ramp.alinea_gain, best_K)
+
+
 if __name__ == "__main__":
     unittest.main()

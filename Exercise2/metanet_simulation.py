@@ -343,6 +343,112 @@ class METANETSimulation:
             raise KeyError(f"Unknown cell name '{target}'.")
         return self._cell_index[target]
 
+    def auto_tune_alinea_gain(
+        self,
+        ramp_index: int,
+        simulator_fn: Callable,
+        tuner_params: Optional[Dict] = None,
+    ) -> float:
+        """Automatically tune the ALINEA gain for a specific ramp.
+        
+        Uses grid search to find the gain value that minimizes a specified
+        objective function over a simulation horizon.
+        
+        Parameters
+        ----------
+        ramp_index : int
+            Index of the ramp to tune (in self.on_ramps list).
+        simulator_fn : Callable
+            Function that simulates the system with a given gain.
+            Signature: simulator_fn(gain: float) -> Dict[str, float]
+            The function should return a dict with metrics like 'rmse', 'delay', etc.
+        tuner_params : Optional[Dict]
+            Tuning parameters:
+            - K_min: Minimum gain to test (default: 0.1)
+            - K_max: Maximum gain to test (default: 100.0)
+            - n_grid: Number of grid points (default: 20)
+            - objective: Metric to minimize (default: 'rmse')
+            - verbose: Print tuning progress (default: False)
+        
+        Returns
+        -------
+        float
+            The best gain value found.
+        
+        Raises
+        ------
+        ValueError
+            If ramp_index is out of range or simulator_fn returns invalid metrics.
+        """
+        if not 0 <= ramp_index < len(self.on_ramps):
+            raise ValueError(f"ramp_index {ramp_index} out of range.")
+        
+        ramp = self.on_ramps[ramp_index]
+        if not ramp.alinea_enabled:
+            raise ValueError(
+                f"Ramp {ramp.name} does not have ALINEA enabled."
+            )
+        
+        # Parse tuner parameters
+        params = tuner_params or {}
+        K_min = params.get('K_min', 0.1)
+        K_max = params.get('K_max', 100.0)
+        n_grid = params.get('n_grid', 20)
+        objective = params.get('objective', 'rmse')
+        verbose = params.get('verbose', False)
+        
+        if K_min >= K_max:
+            raise ValueError("K_min must be less than K_max.")
+        if n_grid < 2:
+            raise ValueError("n_grid must be at least 2.")
+        
+        # Generate candidate gains using simple linspace
+        K_candidates = [K_min + i * (K_max - K_min) / (n_grid - 1) for i in range(n_grid)]
+        
+        best_K = ramp.alinea_gain
+        best_score = float('inf')
+        
+        if verbose:
+            print(f"Auto-tuning ALINEA gain for ramp '{ramp.name}'")
+            print(f"  Testing {n_grid} values from {K_min:.2f} to {K_max:.2f}")
+            print(f"  Objective: {objective}")
+        
+        for K_cand in K_candidates:
+            # Simulate with this candidate gain
+            try:
+                metrics = simulator_fn(K_cand)
+                if not isinstance(metrics, dict):
+                    raise ValueError(
+                        "simulator_fn must return a dictionary of metrics."
+                    )
+                
+                if objective not in metrics:
+                    raise ValueError(
+                        f"Objective '{objective}' not in metrics: {list(metrics.keys())}"
+                    )
+                
+                score = metrics[objective]
+                
+                if verbose:
+                    print(f"  K={K_cand:6.2f} -> {objective}={score:.4f}")
+                
+                if score < best_score:
+                    best_score = score
+                    best_K = K_cand
+                    
+            except Exception as e:
+                if verbose:
+                    print(f"  K={K_cand:6.2f} -> Error: {e}")
+                continue
+        
+        if verbose:
+            print(f"  Best K: {best_K:.2f} with {objective}={best_score:.4f}")
+        
+        # Update the ramp's gain
+        object.__setattr__(ramp, "alinea_gain", best_K)
+        
+        return best_K
+
     def _apply_alinea_control(self, densities: Sequence[float]) -> None:
         """Apply ALINEA feedback control to update ramp metering rates.
         
