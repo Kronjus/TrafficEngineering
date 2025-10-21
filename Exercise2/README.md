@@ -1,8 +1,15 @@
-# Exercise 2 – CTM playground
+# Exercise 2 – Traffic Flow Simulation Playground
 
-This directory contains a fully-featured Cell Transmission Model (CTM) traffic simulator. The implementation offers a lightweight sandbox for experimenting with heterogeneous mainline cells, on-ramp interactions, and simple metering strategies.
+This directory contains two complementary macroscopic traffic flow simulators:
+
+1. **Cell Transmission Model (CTM)** - First-order model tracking density
+2. **METANET** - Second-order model tracking density and speed
+
+Both implementations offer lightweight sandboxes for experimenting with heterogeneous mainline cells, on-ramp interactions, and metering strategies, with compatible APIs for easy comparison.
 
 ## Overview
+
+### Cell Transmission Model (CTM)
 
 The Cell Transmission Model (CTM) is a discrete approximation of the Lighthill-Whitham-Richards (LWR) traffic flow model. It discretizes highways into cells and simulates vehicle flow using:
 
@@ -12,17 +19,51 @@ The Cell Transmission Model (CTM) is a discrete approximation of the Lighthill-W
 - **Queue dynamics** for on-ramps that cannot immediately merge
 - **Heterogeneous cells** supporting lane drops/additions and varying parameters
 
+### METANET
+
+METANET is a second-order macroscopic traffic flow model that tracks both density and speed evolution. It includes:
+
+- **Speed dynamics** with relaxation, convection, and anticipation terms
+- **Greenshields equilibrium speed** function (customizable)
+- **Compatible API** with CTM for easy model comparison
+- **Advanced traffic behavior** modeling driver anticipation and wave propagation
+- **Same features** as CTM (on-ramps, metering, heterogeneous cells)
+
 ## Quick Start
 
-Run the basic demonstration scenario:
+### CTM Quick Start
+
+Run the basic CTM demonstration scenario:
 
 ```bash
 python Exercise2/ctm_simulation.py
 ```
 
-This executes `run_basic_scenario`, demonstrating a three-cell freeway with an on-ramp. Output is displayed as a pandas DataFrame if available, otherwise as Python dictionaries.
+This executes `run_basic_scenario`, demonstrating a three-cell freeway with an on-ramp.
+
+### METANET Quick Start
+
+Run the basic METANET demonstration scenario:
+
+```bash
+python Exercise2/metanet_simulation.py
+```
+
+This executes `run_basic_metanet_scenario`, showing the same scenario with METANET's speed dynamics.
+
+### Compare CTM and METANET
+
+Run side-by-side comparisons:
+
+```bash
+python Exercise2/compare_ctm_metanet.py
+```
+
+This compares both models under identical conditions to understand their differences.
 
 ## Running Examples
+
+### CTM Examples
 
 The `examples_ctm.py` script contains four comprehensive demonstration scenarios:
 
@@ -35,6 +76,21 @@ Examples include:
 2. **On-Ramp Merge** - Single on-ramp with lane drop and queue dynamics
 3. **Ramp Metering** - Comparison of metered vs unmetered scenarios
 4. **Complex Scenario** - 10-cell freeway with two on-ramps and variable lanes
+
+### METANET Examples
+
+The `examples_metanet.py` script contains five comprehensive demonstration scenarios:
+
+```bash
+python Exercise2/examples_metanet.py
+```
+
+Examples include:
+1. **Basic Freeway** - Time-varying demand with speed dynamics
+2. **On-Ramp Merge** - Single on-ramp with lane drop
+3. **Ramp Metering** - Comparison of metered vs unmetered scenarios
+4. **Speed Dynamics** - Wave propagation and stop-and-go behavior
+5. **Complex Scenario** - 10-cell freeway with two on-ramps
 
 Install matplotlib for visualizations:
 ```bash
@@ -57,7 +113,9 @@ The notebook includes:
 
 ## Programmatic Usage
 
-Import and use the simulator in your own code:
+### Using CTM
+
+Import and use the CTM simulator in your own code:
 
 ```python
 from Exercise2.ctm_simulation import (
@@ -96,6 +154,51 @@ sim = CTMSimulation(
 
 result = sim.run(steps=24)
 ```
+
+### Using METANET
+
+Import and use the METANET simulator:
+
+```python
+from Exercise2.metanet_simulation import (
+    build_uniform_metanet_mainline,
+    METANETSimulation,
+    METANETOnRampConfig,
+)
+
+# Create a 4-cell mainline
+cells = build_uniform_metanet_mainline(
+    num_cells=4,
+    cell_length_km=0.5,
+    lanes=[3, 3, 3, 2],
+    free_flow_speed_kmh=100.0,
+    jam_density_veh_per_km_per_lane=160.0,
+    tau_s=18.0,  # Relaxation time (seconds)
+    eta=60.0,    # Anticipation coefficient
+    kappa=40.0,  # Regularization constant
+)
+
+# Configure on-ramp (same API as CTM)
+on_ramp = METANETOnRampConfig(
+    target_cell=2,
+    arrival_rate_profile=lambda step: 400 if step < 12 else 150,
+    meter_rate_veh_per_hour=600.0,
+    mainline_priority=0.7,
+)
+
+# Create and run simulation (same API as CTM)
+sim = METANETSimulation(
+    cells=cells,
+    time_step_hours=0.1,
+    upstream_demand_profile=[1800.0] * 24,
+    downstream_supply_profile=1900.0,
+    on_ramps=[on_ramp],
+)
+
+result = sim.run(steps=24)
+```
+
+Both simulators return the same `SimulationResult` object for compatibility.
 
 ## Accessing Results
 
@@ -149,13 +252,20 @@ Container for simulation outputs with time series and helper methods.
 
 ## Testing
 
-Run the comprehensive test suite:
+Run the comprehensive test suites:
 
 ```bash
+# Test CTM (32 tests)
 python -m unittest Exercise2.test_ctm_simulation -v
+
+# Test METANET (35 tests)
+python -m unittest Exercise2.test_metanet_simulation -v
+
+# Test both together (67 tests)
+python -m unittest Exercise2.test_ctm_simulation Exercise2.test_metanet_simulation -v
 ```
 
-The test suite includes 32 tests covering:
+The test suites cover:
 - Configuration validation
 - Flow and density calculations
 - Vehicle conservation
@@ -163,6 +273,8 @@ The test suite includes 32 tests covering:
 - Profile handling (constant, list, callable)
 - Capacity constraints
 - Merge priority behavior
+- Speed dynamics (METANET only)
+- Steady-state preservation
 
 ## Helper Functions
 
@@ -212,6 +324,44 @@ Where:
 - Q_max = capacity = v · ρ_critical
 - ρ_critical = (w · ρ_jam) / (v + w)
 
+## METANET Theory
+
+METANET is a second-order model with discrete-time dynamics:
+
+1. **Density update** (conservation):
+   - ρᵢ(k+1) = ρᵢ(k) + (T/Lᵢ) × [qᵢ₋₁(k) - qᵢ(k) + rᵢ(k)]
+   
+2. **Speed update** (dynamics):
+   - vᵢ(k+1) = vᵢ(k) + T × [(V(ρᵢ) - vᵢ)/τ - (vᵢ/Lᵢ)(vᵢ - vᵢ₋₁) - (η/τ)(ρᵢ₊₁ - ρᵢ)/(ρᵢ + κ)]
+   
+3. **Flow relation**: qᵢ = ρᵢ × vᵢ × λᵢ
+
+Terms:
+- **Relaxation**: (V(ρᵢ) - vᵢ)/τ - drivers adapt to equilibrium speed
+- **Convection**: -(vᵢ/Lᵢ)(vᵢ - vᵢ₋₁) - speed propagation from upstream
+- **Anticipation**: -(η/τ)(ρᵢ₊₁ - ρᵢ)/(ρᵢ + κ) - drivers react to downstream density
+
+See `METANET_README.md` for detailed equations and parameter guidance.
+
+## Choosing Between CTM and METANET
+
+**Use CTM when:**
+- Focus is on flow and density patterns
+- Computational efficiency is important  
+- Detailed speed dynamics are not critical
+- Simple calibration is desired
+- Analyzing capacity and bottleneck effects
+
+**Use METANET when:**
+- Speed dynamics are important (e.g., variable speed limits)
+- Modeling driver anticipatory behavior
+- Designing traffic control strategies
+- Studying wave propagation and oscillations
+- Need realistic transient behavior
+
+**API Compatibility:**
+Both models share the same result structure (`SimulationResult`) and similar configuration APIs, making it easy to swap models for comparison or experimentation.
+
 ## Design Choices
 
 - **Units**: Consistent use of hours for time, km for distance, vehicles for counts
@@ -247,8 +397,18 @@ The simulator can be extended for:
 
 ## Files
 
+### CTM Files
 - `ctm_simulation.py` - Core CTM implementation
-- `test_ctm_simulation.py` - Comprehensive unit tests
+- `test_ctm_simulation.py` - CTM unit tests (32 tests)
 - `examples_ctm.py` - Four demonstration scenarios with optional visualization
 - `ctm_simulation.ipynb` - Interactive Jupyter notebook with guided examples
+
+### METANET Files
+- `metanet_simulation.py` - Core METANET implementation
+- `test_metanet_simulation.py` - METANET unit tests (35 tests)
+- `examples_metanet.py` - Five demonstration scenarios with optional visualization
+- `METANET_README.md` - Detailed METANET documentation with equations
+
+### Comparison and Documentation
+- `compare_ctm_metanet.py` - Side-by-side model comparison
 - `README.md` - This file
