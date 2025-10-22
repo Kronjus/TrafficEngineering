@@ -1,22 +1,38 @@
-# ALINEA Enhancements
+# ALINEA Simplified Implementation
 
-This document describes the new features added to the ALINEA ramp metering controller implementation.
+This document describes the simplified ALINEA ramp metering controller implementation.
 
 ## Summary
 
-Three major enhancements have been added to the ALINEA implementation:
+The ALINEA implementation has been simplified to use only the pure incremental control law:
 
-1. **Configurable measurement cell** - Choose which cell's density is used for control
-2. **Configurable r limits** - Set min/max bounds on metering rate (already existed, now documented)
-3. **Automatic gain tuning** - Find optimal gain K_R using simulation-based optimization
+**r_i(k) = r_i(k-1) + K_I · (ρ_cr - ρ_m(k-1))**
 
-## 1. Configurable Measurement Cell
+Key changes:
+1. **Removed min/max rate clamping** - Control law operates without bounds
+2. **Removed initial meter rate parameter** - r(0) defaults to 0.0
+3. **Removed target density parameter** - Uses critical density ρ_cr = q_max / v_f
+4. **Retained configurable measurement cell** - Choose which cell's density is used for control
+5. **Retained automatic gain tuning** - Find optimal gain K_I using simulation-based optimization
+
+## Simplified Control Law
 
 ### Description
-By default, ALINEA measures the density at the cell where the ramp merges (target_cell). The new feature allows you to measure density at any other cell, which is useful for:
-- Anticipating downstream congestion
-- Measuring at bottleneck locations
-- Multi-ramp coordination scenarios
+The simplified ALINEA uses only the pure incremental control law without any clamping:
+
+**r_i(k) = r_i(k-1) + K_I · (ρ_cr - ρ_m(k-1))**
+
+where:
+- **r_i(k)**: metering rate at time step k (veh/h)
+- **K_I**: control gain (veh/h per veh/km/lane)
+- **ρ_cr**: critical density = q_max / v_f (veh/km/lane)
+- **ρ_m(k-1)**: measured density at previous time step (veh/km/lane)
+
+### Key Features
+- **No clamping**: Rates can become negative when density >> ρ_cr
+- **No initial rate parameter**: r(0) = 0.0 by default
+- **Uses critical density**: ρ_cr computed from cell capacity and free-flow speed
+- **Simple configuration**: Only K_I and measurement cell needed
 
 ### Usage
 
@@ -26,80 +42,83 @@ from metanet_simulation import METANETOnRampConfig, METANETSimulation
 ramp = METANETOnRampConfig(
     target_cell=2,                    # Ramp merges at cell 2
     arrival_rate_profile=800.0,
-    meter_rate_veh_per_hour=600.0,
     alinea_enabled=True,
-    alinea_gain=50.0,
-    alinea_target_density=80.0,
-    alinea_measurement_cell=3,        # Measure density at cell 3 (downstream)
+    alinea_gain=200.0,                # Control gain K_I
+    alinea_measurement_cell=3,        # Optional: measure at different cell
 )
 ```
 
 ### Parameters
+- `alinea_gain`: Control gain K_I (veh/h per veh/km/lane)
+  - Higher values → more aggressive control
+  - Typical range: 100-300 for severe bottlenecks
+  - Default: 200.0
+
 - `alinea_measurement_cell`: `Optional[Union[int, str]]`
   - Cell index (int) or cell name (str) to use for density measurement
   - Default: `None` (uses `target_cell`)
   - Can specify any valid cell in the simulation
 
+### Deprecated Parameters
+The following parameters are retained for backward compatibility but **ignored** when `alinea_enabled=True`:
+- `alinea_target_density` - Use ρ_cr = q_max / v_f instead
+- `alinea_min_rate` - No clamping applied
+- `alinea_max_rate` - No clamping applied
+- `meter_rate_veh_per_hour` - r(0) = 0.0 by default
+
 ### Example
 ```python
-# Measure at downstream cell (by index)
+# Simplified ALINEA with default measurement cell
 ramp = METANETOnRampConfig(
     target_cell=1,
-    alinea_measurement_cell=2,  # Measure one cell downstream
-    # ... other parameters
+    arrival_rate_profile=1000.0,
+    alinea_enabled=True,
+    alinea_gain=200.0,
 )
 
-# Measure at specific cell (by name)
+# Simplified ALINEA with custom measurement cell
 ramp = METANETOnRampConfig(
-    target_cell="cell_1",
-    alinea_measurement_cell="cell_3",  # Measure at named cell
-    # ... other parameters
+    target_cell=1,
+    arrival_rate_profile=1000.0,
+    alinea_enabled=True,
+    alinea_gain=200.0,
+    alinea_measurement_cell=2,  # Measure one cell downstream
 )
 ```
 
-## 2. Configurable r Limits (r_min, r_max)
+## Configurable Measurement Cell
 
 ### Description
-ALINEA metering rates are automatically clamped to safe bounds to prevent:
-- Overly restrictive metering (too low rate causes excessive queuing)
-- Ineffective metering (too high rate has no control effect)
+By default, ALINEA measures the density at the cell where the ramp merges (target_cell). You can measure density at any other cell, which is useful for:
+- Anticipating downstream congestion
+- Measuring at bottleneck locations upstream of the drop
+- Multi-ramp coordination scenarios
 
 ### Usage
-These parameters were already available in the implementation:
-
 ```python
+# Measure at downstream cell
 ramp = METANETOnRampConfig(
-    target_cell=1,
+    target_cell=2,                    # Ramp merges at cell 2
     arrival_rate_profile=800.0,
-    meter_rate_veh_per_hour=600.0,
     alinea_enabled=True,
-    alinea_gain=50.0,
-    alinea_target_density=80.0,
-    alinea_min_rate=240.0,    # Minimum metering rate (veh/h)
-    alinea_max_rate=1800.0,   # Maximum metering rate (veh/h)
+    alinea_gain=200.0,
+    alinea_measurement_cell=3,        # Measure density at cell 3 (downstream)
+)
+
+# Measure at named cell
+ramp = METANETOnRampConfig(
+    target_cell="merge_cell",
+    arrival_rate_profile=800.0,
+    alinea_enabled=True,
+    alinea_gain=200.0,
+    alinea_measurement_cell="bottleneck_cell",  # Measure at named cell
 )
 ```
 
-### Parameters
-- `alinea_min_rate`: `float` (default: 240.0 veh/h)
-  - Minimum allowed metering rate
-  - Prevents excessive queue buildup
-  
-- `alinea_max_rate`: `float` (default: 2400.0 veh/h)
-  - Maximum allowed metering rate
-  - Ensures control remains active
-
-### Control Law
-The ALINEA control law with clipping:
-```
-r(k+1) = r(k) + K_R * (ρ_target - ρ_measured)
-r(k+1) = clip(r(k+1), r_min, r_max)
-```
-
-## 3. Automatic Gain Tuning
+## Automatic Gain Tuning
 
 ### Description
-The new `auto_tune_alinea_gain()` method automatically finds the optimal gain K_R by:
+The `auto_tune_alinea_gain()` method automatically finds the optimal gain K_I by:
 - Performing grid search over candidate gain values
 - Running simulations with each candidate gain
 - Evaluating performance using a specified objective function (e.g., RMSE, delay)
@@ -122,21 +141,35 @@ sim = METANETSimulation(
 def evaluate_gain(K: float) -> dict:
     """Simulate with given gain and return metrics."""
     # Create test simulation with gain K
-    test_sim = create_test_simulation(K)
+    test_ramp = METANETOnRampConfig(
+        target_cell=2,
+        arrival_rate_profile=900.0,
+        alinea_enabled=True,
+        alinea_gain=K,  # Test this gain
+    )
+    test_sim = METANETSimulation(
+        cells=test_cells,
+        time_step_hours=0.05,
+        upstream_demand_profile=4000.0,
+        on_ramps=[test_ramp],
+    )
     result = test_sim.run(steps=40)
     
-    # Compute objective (e.g., RMSE from target density)
-    rmse = compute_rmse(result.densities["cell_2"], target=80.0)
+    # Compute objective (RMSE from critical density)
+    rho_cr = 2200.0 / 100.0  # capacity / free_flow_speed
+    densities = result.densities["cell_2"]
+    squared_errors = [(d - rho_cr) ** 2 for d in densities]
+    rmse = (sum(squared_errors) / len(squared_errors)) ** 0.5
     
-    return {'rmse': rmse, 'delay': compute_delay(result)}
+    return {'rmse': rmse}
 
 # Run auto-tuning
 tuner_params = {
-    'K_min': 10.0,      # Minimum gain to test
-    'K_max': 90.0,      # Maximum gain to test
-    'n_grid': 20,       # Number of grid points
+    'K_min': 50.0,       # Minimum gain to test
+    'K_max': 300.0,      # Maximum gain to test
+    'n_grid': 20,        # Number of grid points
     'objective': 'rmse', # Metric to minimize
-    'verbose': True,    # Print progress
+    'verbose': True,     # Print progress
 }
 
 best_K = sim.auto_tune_alinea_gain(
@@ -178,34 +211,46 @@ Example:
 ```python
 def evaluate_gain(K: float) -> dict:
     # Setup test simulation
-    test_cells = build_uniform_metanet_mainline(...)
+    test_cells = build_uniform_metanet_mainline(
+        num_cells=4,
+        cell_length_km=0.5,
+        lanes=3,
+        free_flow_speed_kmh=100.0,
+        jam_density_veh_per_km_per_lane=160.0,
+        capacity_veh_per_hour_per_lane=2200.0,
+    )
     test_ramp = METANETOnRampConfig(
-        ...,
+        target_cell=2,
+        arrival_rate_profile=900.0,
+        alinea_enabled=True,
         alinea_gain=K,  # Use test gain
     )
-    test_sim = METANETSimulation(...)
+    test_sim = METANETSimulation(
+        cells=test_cells,
+        time_step_hours=0.05,
+        upstream_demand_profile=4000.0,
+        on_ramps=[test_ramp],
+    )
     
     # Run simulation
     result = test_sim.run(steps=50)
     
     # Calculate metrics
+    rho_cr = 2200.0 / 100.0  # critical density
     densities = result.densities["cell_2"]
-    rmse = sqrt(mean((densities - target)**2))
-    delay = sum(result.ramp_queues["ramp_2"]) * time_step
+    squared_errors = [(d - rho_cr) ** 2 for d in densities]
+    rmse = (sum(squared_errors) / len(squared_errors)) ** 0.5
     
-    return {
-        'rmse': rmse,
-        'delay': delay,
-        'total_queue': sum(result.ramp_queues["ramp_2"])
-    }
+    return {'rmse': rmse}
 ```
 
 ### Objectives
 Common objective functions:
-- `'rmse'`: Root mean squared error from target density (good for tracking)
+- `'rmse'`: Root mean squared error from critical density ρ_cr (good for tracking)
 - `'delay'`: Total vehicle delay (good for minimizing queues)
-- `'throughput'`: Maximize mainline throughput
 - Custom: Any metric returned by simulator_fn
+
+Note: For simplified ALINEA, use RMSE from ρ_cr rather than an arbitrary target density.
 
 ### Full Example
 See `alinea_demo.py` Scenario 4 for a complete working example.
@@ -242,18 +287,33 @@ python alinea_demo.py
 
 The demo includes four scenarios:
 1. Fixed-rate metering (baseline)
-2. Standard ALINEA control
+2. Simplified ALINEA control
 3. ALINEA with custom measurement cell
 4. ALINEA with automatic gain tuning
 
 ## Backward Compatibility
 
-All changes are backward compatible:
-- Existing code continues to work unchanged
-- New parameters have sensible defaults
-- Default behavior matches original implementation
+The simplified ALINEA maintains backward compatibility:
+- Deprecated parameters (`alinea_target_density`, `alinea_min_rate`, `alinea_max_rate`, `meter_rate_veh_per_hour`) are retained but **ignored** when `alinea_enabled=True`
+- Existing code will run but should be updated to use the simplified API
+- The new default gain is 200.0 (changed from 50.0 to match typical range for severe bottlenecks)
 
 ## Implementation Notes
+
+### Simplified Control Law Behavior
+
+**Important**: The simplified ALINEA does not clamp rates, which means:
+- When ρ_m >> ρ_cr (high congestion), rates will **decrease** and can become **negative**
+- When ρ_m << ρ_cr (low density), rates will **increase** without bound
+- Negative rates are acceptable mathematically but physically meaningless
+- In real systems, negative rates would be treated as zero (no vehicles released)
+- For simulation analysis, observe the range of rates to ensure they remain reasonable
+
+**Recommendation**: 
+- Choose K_I such that rates remain in reasonable ranges for your scenario
+- For typical motorway scenarios: K_I = 100-300 veh/h per (veh/km/lane)
+- Monitor rate trajectories during simulation to detect instability
+- If rates become extremely negative or positive, reduce K_I
 
 ### Measurement Cell Resolution
 - During simulation initialization, cell names/indices are resolved to integer indices

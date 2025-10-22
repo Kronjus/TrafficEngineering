@@ -85,17 +85,15 @@ def run_with_alinea():
         initial_density_veh_per_km_per_lane=20.0,
     )
 
-    # Same demand, but with ALINEA control
+    # Same demand, but with simplified ALINEA control
     on_ramp = OnRampConfig(
         target_cell=2,
         arrival_rate_profile=1200.0,  # Same high arrival demand
-        meter_rate_veh_per_hour=800.0,  # Initial rate (will be adjusted)
         mainline_priority=0.7,
         alinea_enabled=True,
-        alinea_gain=60.0,  # Control gain
-        alinea_target_density=100.0,  # Target density (veh/km/lane)
-        alinea_min_rate=240.0,
-        alinea_max_rate=1800.0,
+        alinea_gain=200.0,  # Control gain K_I (veh/h per veh/km/lane)
+        # No initial rate, min/max bounds, or target density needed
+        # Uses simplified law: r(k) = r(k-1) + K_I * (rho_cr - rho_m(k-1))
     )
 
     sim = CTMSimulation(
@@ -113,12 +111,15 @@ def run_with_alinea():
     max_density_cell2 = max(result.densities["cell_2"])
     final_rate = on_ramp.meter_rate_veh_per_hour
     
+    # Compute critical density for reference
+    rho_cr = 2200.0 / 100.0  # capacity / free_flow_speed
+    
     print(f"\nResults:")
     print(f"  Maximum ramp queue: {max_queue:.1f} vehicles")
     print(f"  Average ramp queue: {avg_queue:.1f} vehicles")
     print(f"  Maximum density at merge cell: {max_density_cell2:.1f} veh/km/lane")
     print(f"  Final metering rate: {final_rate:.1f} veh/h")
-    print(f"  Target density: {on_ramp.alinea_target_density:.1f} veh/km/lane")
+    print(f"  Critical density (rho_cr): {rho_cr:.1f} veh/km/lane")
     
     return result
 
@@ -143,13 +144,10 @@ def run_with_custom_measurement_cell():
     on_ramp = METANETOnRampConfig(
         target_cell=2,
         arrival_rate_profile=1000.0,
-        meter_rate_veh_per_hour=700.0,
         alinea_enabled=True,
-        alinea_gain=55.0,
-        alinea_target_density=90.0,
+        alinea_gain=200.0,  # Control gain K_I
         alinea_measurement_cell=3,  # Measure downstream cell
-        alinea_min_rate=240.0,
-        alinea_max_rate=1800.0,
+        # No initial rate, min/max bounds, or target density needed
     )
 
     sim = METANETSimulation(
@@ -166,13 +164,16 @@ def run_with_custom_measurement_cell():
     max_density_cell3 = max(result.densities["cell_3"])
     final_rate = on_ramp.meter_rate_veh_per_hour
     
+    # Compute critical density for reference (from measurement cell)
+    rho_cr = 2200.0 / 100.0  # capacity / free_flow_speed
+    
     print(f"\nResults:")
     print(f"  Merge cell: 2, Measurement cell: {on_ramp.alinea_measurement_cell}")
     print(f"  Maximum ramp queue: {max_queue:.1f} vehicles")
     print(f"  Average ramp queue: {avg_queue:.1f} vehicles")
     print(f"  Maximum density at measurement cell: {max_density_cell3:.1f} veh/km/lane")
     print(f"  Final metering rate: {final_rate:.1f} veh/h")
-    print(f"  Target density: {on_ramp.alinea_target_density:.1f} veh/km/lane")
+    print(f"  Critical density (rho_cr): {rho_cr:.1f} veh/km/lane")
     
     return result
 
@@ -197,12 +198,9 @@ def run_with_auto_tuning():
     on_ramp = METANETOnRampConfig(
         target_cell=2,
         arrival_rate_profile=900.0,
-        meter_rate_veh_per_hour=650.0,
         alinea_enabled=True,
-        alinea_gain=30.0,  # Initial guess (will be tuned)
-        alinea_target_density=80.0,
-        alinea_min_rate=240.0,
-        alinea_max_rate=1800.0,
+        alinea_gain=100.0,  # Initial guess (will be tuned)
+        # No initial rate, min/max bounds, or target density needed
     )
 
     sim = METANETSimulation(
@@ -221,18 +219,15 @@ def run_with_auto_tuning():
             lanes=3,
             free_flow_speed_kmh=100.0,
             jam_density_veh_per_km_per_lane=160.0,
+            capacity_veh_per_hour_per_lane=2200.0,
             initial_density_veh_per_km_per_lane=40.0,
         )
 
         test_ramp = METANETOnRampConfig(
             target_cell=2,
             arrival_rate_profile=900.0,
-            meter_rate_veh_per_hour=650.0,
             alinea_enabled=True,
             alinea_gain=K,  # Test this gain
-            alinea_target_density=80.0,
-            alinea_min_rate=240.0,
-            alinea_max_rate=1800.0,
         )
 
         test_sim = METANETSimulation(
@@ -245,10 +240,10 @@ def run_with_auto_tuning():
         # Run short evaluation
         result = test_sim.run(steps=40)
 
-        # Calculate RMSE from target density
-        target_density = 80.0
+        # Calculate RMSE from critical density
+        rho_cr = 2200.0 / 100.0  # capacity / free_flow_speed = 22.0
         densities = result.densities["cell_2"]
-        squared_errors = [(d - target_density) ** 2 for d in densities]
+        squared_errors = [(d - rho_cr) ** 2 for d in densities]
         rmse = (sum(squared_errors) / len(squared_errors)) ** 0.5
 
         return {'rmse': rmse}
@@ -257,8 +252,8 @@ def run_with_auto_tuning():
     initial_gain = on_ramp.alinea_gain
     
     tuner_params = {
-        'K_min': 10.0,
-        'K_max': 90.0,
+        'K_min': 50.0,
+        'K_max': 300.0,
         'n_grid': 10,
         'objective': 'rmse',
         'verbose': True,  # Show tuning progress
@@ -281,12 +276,13 @@ def run_with_auto_tuning():
     max_queue = max(result.ramp_queues["ramp_2"])
     avg_queue = sum(result.ramp_queues["ramp_2"]) / len(result.ramp_queues["ramp_2"])
     max_density = max(result.densities["cell_2"])
+    rho_cr = 2200.0 / 100.0
     
     print(f"\nFinal Results:")
     print(f"  Maximum ramp queue: {max_queue:.1f} vehicles")
     print(f"  Average ramp queue: {avg_queue:.1f} vehicles")
     print(f"  Maximum density at merge cell: {max_density:.1f} veh/km/lane")
-    print(f"  Target density: {on_ramp.alinea_target_density:.1f} veh/km/lane")
+    print(f"  Critical density (rho_cr): {rho_cr:.1f} veh/km/lane")
     
     return result
 
@@ -322,23 +318,26 @@ def compare_scenarios():
     print(f"  Fixed metering:    {fixed_max_density:6.1f}")
     print(f"  ALINEA control:    {alinea_max_density:6.1f}")
     
-    print("\nNew ALINEA Features Demonstrated:")
-    print("  ✓ Configurable measurement cell (Scenario 3)")
+    print("\nSimplified ALINEA Features Demonstrated:")
+    print("  ✓ Pure incremental control law (Scenarios 2-4)")
+    print("    - Uses: r(k) = r(k-1) + K_I * (rho_cr - rho_m(k-1))")
+    print("    - No min/max clamping (rates can go negative)")
+    print("    - Critical density rho_cr computed from capacity/free_flow_speed")
+    print("    - Initial rate r(0) = 0.0 by default")
+    print("\n  ✓ Configurable measurement cell (Scenario 3)")
     print("    - Allows measuring density at a different cell than merge point")
     print("    - Useful for anticipating downstream congestion")
     print("\n  ✓ Automatic gain tuning (Scenario 4)")
-    print("    - Grid search over K values to find optimal gain")
-    print("    - Minimizes density tracking error (RMSE)")
+    print("    - Grid search over K_I values to find optimal gain")
+    print("    - Minimizes density tracking error (RMSE from rho_cr)")
     print("    - Can use custom objective functions")
-    print("\n  ✓ Configurable r_min and r_max limits")
-    print("    - Already demonstrated in all ALINEA scenarios")
-    print("    - Ensures safe metering rate bounds")
     
-    print("\nALINEA Benefits:")
-    print("  • Prevents mainline congestion by adjusting to traffic conditions")
-    print("  • Balances ramp queue growth with mainline capacity")
-    print("  • Automatically adapts to changing demand patterns")
-    print("  • Maintains target density for optimal throughput")
+    print("\nSimplified ALINEA Benefits:")
+    print("  • Pure theoretical control law without arbitrary bounds")
+    print("  • Uses physical critical density (capacity/free_flow_speed)")
+    print("  • Simpler configuration: only gain K_I and measurement cell needed")
+    print("  • More predictable behavior for analysis and tuning")
+    print("  • Note: May produce negative rates when density >> rho_cr")
     
     print("\n" + "=" * 70)
     print("To visualize results, modify this script to plot densities and queues")
