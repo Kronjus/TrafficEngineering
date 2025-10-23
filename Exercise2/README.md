@@ -380,6 +380,190 @@ result = sim.run(steps=50)
 - Papageorgiou, M., Hadj-Salem, H., & Blosseville, J. M. (1991). "ALINEA: A local feedback control law for on-ramp metering." *Transportation Research Record*, 1320, 58-67.
 - Papageorgiou, M., & Kotsialos, A. (2002). "Freeway ramp metering: An overview." *IEEE Transactions on Intelligent Transportation Systems*, 3(4), 271-281.
 
+### P-ALINEA Ramp Metering (NEW)
+
+P-ALINEA extends standard ALINEA by adding an optional **proportional term** to the control law, creating a PI (Proportional-Integral) controller. This provides more anticipatory control and faster response to changing conditions.
+
+#### P-ALINEA Algorithm
+
+The P-ALINEA control law is:
+
+```
+e(k) = ρ_target - ρ_measured
+Δr = K_I × e(k) + K_P × (e(k) - e(k-1))
+r(k+1) = clip(r(k) + Δr, r_min, r_max)
+```
+
+Where:
+- `K_I` is the integral gain (standard ALINEA gain) (veh/h per veh/km/lane)
+- `K_P` is the proportional gain (veh/h per veh/km/lane)
+- `e(k)` is the density error at time k
+- `e(k-1)` is the previous density error
+
+**Key Feature**: When `K_P = 0`, P-ALINEA reduces to standard ALINEA (fully backward compatible).
+
+#### Using P-ALINEA
+
+**CTM Example:**
+```python
+from Exercise2.ctm_simulation import OnRampConfig, CTMSimulation
+
+# P-ALINEA with both proportional and integral gains
+on_ramp = OnRampConfig(
+    target_cell=2,
+    arrival_rate_profile=1200.0,
+    meter_rate_veh_per_hour=800.0,
+    alinea_enabled=True,
+    alinea_gain=50.0,                    # K_I (integral gain)
+    alinea_proportional_gain=0.3,        # K_P (proportional gain)
+    alinea_target_density=100.0,
+    alinea_min_rate=240.0,
+    alinea_max_rate=1800.0,
+)
+
+sim = CTMSimulation(
+    cells=cells,
+    time_step_hours=0.05,
+    upstream_demand_profile=5000.0,
+    on_ramps=[on_ramp],
+)
+
+result = sim.run(steps=60)
+```
+
+**METANET Example:**
+```python
+from Exercise2.metanet_simulation import METANETOnRampConfig, METANETSimulation
+
+on_ramp = METANETOnRampConfig(
+    target_cell=2,
+    arrival_rate_profile=1200.0,
+    meter_rate_veh_per_hour=800.0,
+    alinea_enabled=True,
+    alinea_gain=50.0,                    # K_I
+    alinea_proportional_gain=0.3,        # K_P
+    alinea_target_density=100.0,
+)
+
+sim = METANETSimulation(
+    cells=cells,
+    time_step_hours=0.05,
+    upstream_demand_profile=5000.0,
+    on_ramps=[on_ramp],
+)
+
+result = sim.run(steps=60)
+```
+
+#### Grid Search Tuning
+
+Automatically find optimal `(K_P, K_I)` gains by minimizing:
+
+```
+J = VHT + sum_k(r(k) - r(k-1))²
+```
+
+Where:
+- `VHT` = Vehicle Hours Traveled (congestion measure)
+- `sum_k(r(k) - r(k-1))²` = Ramp rate penalty (smoothness measure)
+
+**Example:**
+```python
+from Exercise2.alinea_tuning import grid_search_tune_alinea
+
+# Define base configuration
+base_ramp = OnRampConfig(
+    target_cell=2,
+    arrival_rate_profile=1200.0,
+    meter_rate_veh_per_hour=800.0,
+    alinea_enabled=True,
+    alinea_target_density=100.0,
+)
+
+# Run grid search
+results = grid_search_tune_alinea(
+    cells=cells,
+    ramp_config=base_ramp,
+    simulation_class=CTMSimulation,
+    upstream_demand_profile=5000.0,
+    time_step_hours=0.05,
+    steps=60,
+    kp_range=(0.0, 1.0, 0.2),   # Test K_P from 0.0 to 1.0, step 0.2
+    ki_range=(20.0, 80.0, 20.0), # Test K_I from 20 to 80, step 20
+    verbose=True,
+)
+
+print(f"Best K_P: {results['Kp']:.3f}")
+print(f"Best K_I: {results['Ki']:.3f}")
+print(f"Objective J: {results['J']:.2f}")
+
+# Save results to CSV
+from alinea_tuning import save_tuning_results_csv
+save_tuning_results_csv(results, 'tuning_results.csv')
+```
+
+**Run the Demo:**
+```bash
+python Exercise2/palinea_demo.py
+```
+
+This demonstration compares:
+1. Standard ALINEA (K_P=0)
+2. P-ALINEA with fixed gains
+3. P-ALINEA with grid-search tuned gains
+
+#### P-ALINEA Parameter Guidelines
+
+**Proportional Gain (K_P)**:
+- Range: 0.0 to 1.0 (typical)
+- `K_P = 0`: Standard ALINEA (integral-only)
+- `K_P > 0`: Adds anticipatory response to error changes
+- Higher values → faster response but may cause oscillations
+- Start small (0.1-0.3) and tune
+
+**Integral Gain (K_I)**:
+- Same as standard ALINEA gain K_R
+- Range: 20-80 veh/h per veh/km/lane
+- Should be tuned jointly with K_P
+
+**Grid Search Parameters**:
+- `kp_range`, `ki_range`: (min, max, step) tuples
+- `vht_weight`: Weight for VHT term (default: 1.0)
+- `ramp_penalty_weight`: Weight for rate penalty (default: 1.0)
+- Adjust weights to prioritize travel time vs. smooth control
+
+#### Benefits of P-ALINEA
+
+1. **Faster response** to changing conditions via proportional term
+2. **Anticipatory control** reacts to error trends, not just error magnitude
+3. **Backward compatible** - reduces to standard ALINEA when K_P=0
+4. **Auto-tuning** - grid search finds optimal gains automatically
+5. **Balances objectives** - minimizes both congestion and control oscillations
+
+#### Performance Metrics
+
+**Vehicle Hours Traveled (VHT)**:
+```python
+# Compute from simulation result
+cell_lengths = {cell.name: cell.length_km for cell in cells}
+vht = result.compute_vht(cell_lengths)
+print(f"VHT: {vht:.2f} veh-hours")
+```
+
+**Ramp Rate Penalty**:
+```python
+# Measures smoothness of control
+penalty = result.compute_ramp_rate_penalty()
+print(f"Ramp penalty: {penalty:.2f}")
+```
+
+**Combined Objective**:
+```python
+J = vht + penalty
+print(f"Objective J: {J:.2f}")
+```
+
+
 ### `CTMSimulation`
 Main simulator class:
 - `cells`: List of CellConfig objects

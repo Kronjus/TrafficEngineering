@@ -25,6 +25,8 @@ Comprehensive macroscopic traffic flow simulators with CTM and METANET models.
 - METANET - Second-order density and speed model
 - On-ramp merging with queue dynamics
 - ALINEA feedback ramp metering control
+- **P-ALINEA** - Enhanced PI controller with proportional gain
+- **Grid search auto-tuning** - Optimize P and I gains
 - Ramp metering strategies
 - Time-varying demand profiles
 - Lane drops and capacity bottlenecks
@@ -41,6 +43,9 @@ python Exercise2/metanet_simulation.py
 # Run ALINEA ramp metering demo
 python Exercise2/alinea_demo.py
 
+# Run P-ALINEA demo with grid search tuning
+python Exercise2/palinea_demo.py
+
 # Run comprehensive examples
 python Exercise2/examples_ctm.py
 python Exercise2/examples_metanet.py
@@ -48,8 +53,8 @@ python Exercise2/examples_metanet.py
 # Interactive notebook
 jupyter notebook Exercise2/ctm_simulation.ipynb
 
-# Run tests (91 tests total)
-python -m unittest Exercise2.test_ctm_simulation Exercise2.test_metanet_simulation
+# Run tests (110 tests total, including P-ALINEA)
+python -m unittest Exercise2.test_ctm_simulation Exercise2.test_metanet_simulation Exercise2.test_palinea
 ```
 
 See [Exercise2/README.md](Exercise2/README.md) for complete documentation.
@@ -185,7 +190,7 @@ on_ramp = OnRampConfig(
     arrival_rate_profile=800.0,
     meter_rate_veh_per_hour=600.0,  # Initial rate
     alinea_enabled=True,             # Enable ALINEA
-    alinea_gain=50.0,                # Control gain
+    alinea_gain=50.0,                # Control gain K_I
     alinea_target_density=120.0,     # Target density (veh/km/lane)
 )
 
@@ -198,6 +203,46 @@ sim = CTMSimulation(
 
 result = sim.run(steps=50)
 print(f"Final metering rate: {on_ramp.meter_rate_veh_per_hour:.0f} veh/h")
+```
+
+### P-ALINEA with Auto-Tuning Example
+
+```python
+from Exercise2.ctm_simulation import build_uniform_mainline, CTMSimulation, OnRampConfig
+from Exercise2.alinea_tuning import grid_search_tune_alinea
+
+cells = build_uniform_mainline(
+    num_cells=5, cell_length_km=0.5, lanes=3,
+    free_flow_speed_kmh=100.0, congestion_wave_speed_kmh=20.0,
+    capacity_veh_per_hour_per_lane=2200.0,
+    jam_density_veh_per_km_per_lane=160.0,
+)
+
+# Base ramp configuration
+base_ramp = OnRampConfig(
+    target_cell=2,
+    arrival_rate_profile=1200.0,
+    meter_rate_veh_per_hour=800.0,
+    alinea_enabled=True,
+    alinea_target_density=100.0,
+)
+
+# Auto-tune (Kp, Ki) gains using grid search
+results = grid_search_tune_alinea(
+    cells=cells,
+    ramp_config=base_ramp,
+    simulation_class=CTMSimulation,
+    upstream_demand_profile=5000.0,
+    time_step_hours=0.05,
+    steps=60,
+    kp_range=(0.0, 1.0, 0.2),     # Test Kp from 0 to 1
+    ki_range=(20.0, 80.0, 20.0),  # Test Ki from 20 to 80
+)
+
+print(f"Best Kp: {results['Kp']:.3f}, Ki: {results['Ki']:.3f}")
+print(f"Objective J (VHT + ramp_penalty): {results['J']:.2f}")
+```
+
 ```
 
 ## Testing
@@ -230,7 +275,20 @@ The test suite includes:
 - Conservation checks
 - ALINEA ramp metering control
 
-All tests pass successfully (91 total).
+### P-ALINEA Tests
+```bash
+cd Exercise2
+python -m unittest test_palinea -v
+```
+
+The test suite includes:
+- 10 comprehensive unit tests for P-ALINEA
+- Backward compatibility (Kp=0 matches standard ALINEA)
+- Proportional gain behavior
+- VHT and ramp rate penalty computation
+- Grid search tuning validation
+
+All tests pass successfully (110 total).
 
 ## Documentation
 
@@ -252,8 +310,10 @@ All tests pass successfully (91 total).
 | On-ramps | - | ✓ |
 | Ramp Metering | - | ✓ |
 | ALINEA Control | - | ✓ |
+| P-ALINEA Control | - | ✓ |
+| Grid Search Tuning | - | ✓ |
 | Time-varying Demand | - | ✓ |
-| Unit Tests | - | ✓ (91 tests) |
+| Unit Tests | - | ✓ (110 tests) |
 | Examples | ✓ | ✓ |
 | Jupyter Notebook | ✓ | ✓ |
 
