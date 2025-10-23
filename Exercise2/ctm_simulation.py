@@ -234,8 +234,12 @@ class OnRampConfig:
         If True, enables ALINEA feedback ramp metering control. Requires
         meter_rate_veh_per_hour as initial rate. Default: False.
     alinea_gain : float
-        ALINEA regulator gain K_R (veh/h per veh/km/lane). Higher values lead
+        ALINEA integral gain K_I (veh/h per veh/km/lane). Higher values lead
         to more aggressive control. Typical range: 40-70. Default: 50.0.
+    alinea_proportional_gain : float
+        P-ALINEA proportional gain K_P (veh/h per veh/km/lane). If 0, controller
+        behaves as standard ALINEA (integral-only). If > 0, implements P-ALINEA
+        (PI control). Default: 0.0.
     alinea_target_density : Optional[float]
         Target density (veh/km/lane) for ALINEA control. If None, uses 80% of
         jam density of the target cell. Default: None.
@@ -246,6 +250,9 @@ class OnRampConfig:
     queue_veh : float
         Runtime queue size (veh). Marked ``init=False`` and initialised in
         ``__post_init__`` from ``initial_queue_veh``.
+    alinea_previous_error : float
+        Runtime state for P-ALINEA: previous density error for proportional term.
+        Marked ``init=False``, initialised to 0.0.
     """
 
     target_cell: Union[int, str]
@@ -256,12 +263,15 @@ class OnRampConfig:
     name: Optional[str] = None
     alinea_enabled: bool = False
     alinea_gain: float = 50.0
+    alinea_proportional_gain: float = 0.0
     alinea_target_density: Optional[float] = None
     alinea_min_rate: float = 240.0
     alinea_max_rate: float = 2400.0
 
     # Runtime state: current queue size in vehicles. Not provided by caller.
     queue_veh: float = field(init=False)
+    # Runtime state: previous density error for P-ALINEA proportional term.
+    alinea_previous_error: float = field(init=False)
 
     def __post_init__(self) -> None:
         # Validate that priority is a proper fraction.
@@ -284,6 +294,8 @@ class OnRampConfig:
                 )
             if self.alinea_gain <= 0:
                 raise ValueError("alinea_gain must be positive.")
+            if self.alinea_proportional_gain < 0:
+                raise ValueError("alinea_proportional_gain cannot be negative.")
             if self.alinea_min_rate < 0:
                 raise ValueError("alinea_min_rate cannot be negative.")
             if self.alinea_max_rate <= 0:
@@ -297,6 +309,8 @@ class OnRampConfig:
 
         # Initialise the runtime queue as a float copy of the configured initial queue.
         self.queue_veh = float(self.initial_queue_veh)
+        # Initialise previous error for P-ALINEA to 0.0
+        self.alinea_previous_error = 0.0
 
 
 @dataclass
@@ -324,6 +338,9 @@ class SimulationResult:
     ramp_flows: Dict[str, List[float]]
     # Time step used by the simulation (hours).
     time_step_hours: float
+    # Ramp metering rates: mapping ramp name -> list of metering rates (veh/h)
+    # sampled at the same times as densities (including initial value).
+    ramp_meter_rates: Dict[str, List[float]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # Basic validation to catch misconfigured results early.
@@ -368,6 +385,53 @@ class SimulationResult:
         times = self.time_vector()
         # Pair consecutive times to form intervals; length = steps - 1.
         return list(zip(times[:-1], times[1:]))
+
+    def compute_vht(self, cell_lengths_km: Dict[str, float]) -> float:
+        """Compute total Vehicle Hours Traveled (VHT) for the simulation.
+        
+        VHT = sum over all cells and timesteps of:
+              (density * cell_length * num_lanes * dt)
+        
+        Parameters
+        ----------
+        cell_lengths_km : Dict[str, float]
+            Mapping from cell name to cell length in kilometers.
+        
+        Returns
+        -------
+        float
+            Total vehicle hours traveled.
+        """
+        vht = 0.0
+        for cell_name, density_series in self.densities.items():
+            cell_length = cell_lengths_km[cell_name]
+            # Sum over all time steps (excluding the last since it's end state)
+            # density is in veh/km/lane, multiply by length, lanes and time
+            for i in range(len(density_series) - 1):
+                # Use trapezoidal rule for better accuracy: (d[i] + d[i+1])/2
+                avg_density = (density_series[i] + density_series[i + 1]) / 2.0
+                # We don't have lane info here, so VHT is per lane
+                # Caller needs to provide lane info or we compute relative VHT
+                vht += avg_density * cell_length * self.time_step_hours
+        return vht
+    
+    def compute_ramp_rate_penalty(self) -> float:
+        """Compute ramp rate penalty: sum_k (r(k) - r(k-1))^2.
+        
+        This penalizes rapid changes in metering rate, encouraging smooth control.
+        
+        Returns
+        -------
+        float
+            Sum of squared rate changes across all ramps and time steps.
+        """
+        penalty = 0.0
+        for ramp_name, rate_series in self.ramp_meter_rates.items():
+            # Sum squared differences between consecutive rates
+            for i in range(1, len(rate_series)):
+                rate_change = rate_series[i] - rate_series[i - 1]
+                penalty += rate_change ** 2
+        return penalty
 
     def to_dataframe(self) -> "pd.DataFrame":
         """Return a tidy pandas ``DataFrame`` with the simulation outputs.
@@ -544,9 +608,15 @@ class CTMSimulation:
         return self._cell_index[target]
 
     def _apply_alinea_control(self, densities: Sequence[float]) -> None:
-        """Apply ALINEA feedback control to update ramp metering rates.
+        """Apply ALINEA or P-ALINEA feedback control to update ramp metering rates.
         
-        ALINEA algorithm: r(k+1) = r(k) + K_R * (ρ_target - ρ_measured)
+        Standard ALINEA (when alinea_proportional_gain == 0):
+            r(k+1) = r(k) + K_I * (ρ_target - ρ_measured)
+        
+        P-ALINEA (when alinea_proportional_gain > 0):
+            e(k) = ρ_target - ρ_measured
+            Δr = K_I * e(k) + K_P * (e(k) - e(k-1))
+            r(k+1) = clip(r(k) + Δr, r_min, r_max)
         
         The measured density is taken from the target cell where the ramp merges.
         
@@ -563,10 +633,23 @@ class CTMSimulation:
             measured_density = densities[target_idx]
             target_density = ramp.alinea_target_density
             
-            # ALINEA control law: adjust rate based on density error
-            # K_R is in (veh/h) per (veh/km/lane), so units work out to veh/h
+            # Compute current density error
             density_error = target_density - measured_density
-            rate_adjustment = ramp.alinea_gain * density_error
+            
+            # P-ALINEA control law (incremental PI form)
+            # K_I is the integral gain (standard ALINEA gain)
+            # K_P is the proportional gain (0 for standard ALINEA)
+            Ki = ramp.alinea_gain
+            Kp = ramp.alinea_proportional_gain
+            
+            # Integral term (always present)
+            integral_term = Ki * density_error
+            
+            # Proportional term (error change)
+            proportional_term = Kp * (density_error - ramp.alinea_previous_error)
+            
+            # Total rate adjustment
+            rate_adjustment = integral_term + proportional_term
             
             # Update metering rate
             current_rate = ramp.meter_rate_veh_per_hour or 0.0
@@ -574,6 +657,9 @@ class CTMSimulation:
             
             # Clamp to min/max bounds
             new_rate = max(ramp.alinea_min_rate, min(new_rate, ramp.alinea_max_rate))
+            
+            # Store current error for next iteration
+            object.__setattr__(ramp, "alinea_previous_error", density_error)
             
             # Update the ramp's metering rate
             object.__setattr__(ramp, "meter_rate_veh_per_hour", new_rate)
@@ -608,6 +694,10 @@ class CTMSimulation:
             ramp.name: [ramp.queue_veh] for ramp in self.on_ramps
         }
         ramp_flow_history: Dict[str, List[float]] = {ramp.name: [] for ramp in self.on_ramps}
+        # Track metering rates for P-ALINEA tuning (includes initial rate)
+        ramp_meter_rate_history: Dict[str, List[float]] = {
+            ramp.name: [ramp.meter_rate_veh_per_hour or 0.0] for ramp in self.on_ramps
+        }
 
         # Main time-stepping loop.
         for step in range(steps):
@@ -684,6 +774,8 @@ class CTMSimulation:
             for ramp in self.on_ramps:
                 ramp_flow_history[ramp.name].append(ramp_flows_step[ramp.name])
                 ramp_queue_history[ramp.name].append(ramp.queue_veh)
+                # Record the current metering rate
+                ramp_meter_rate_history[ramp.name].append(ramp.meter_rate_veh_per_hour or 0.0)
 
             # Integrate densities using conservation: rho_new = rho + (dt/length) * (inflow - outflow)/lanes
             for idx, cell in enumerate(self.cells):
@@ -703,6 +795,7 @@ class CTMSimulation:
             flows=flow_history,
             ramp_queues=ramp_queue_history,
             ramp_flows=ramp_flow_history,
+            ramp_meter_rates=ramp_meter_rate_history,
             time_step_hours=self.dt,
         )
 

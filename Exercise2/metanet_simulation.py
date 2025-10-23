@@ -124,8 +124,12 @@ class METANETOnRampConfig:
         If True, enables ALINEA feedback ramp metering control. Requires
         meter_rate_veh_per_hour as initial rate. Default: False.
     alinea_gain : float
-        ALINEA regulator gain K_R (veh/h per veh/km/lane). Higher values lead
+        ALINEA integral gain K_I (veh/h per veh/km/lane). Higher values lead
         to more aggressive control. Typical range: 40-70. Default: 50.0.
+    alinea_proportional_gain : float
+        P-ALINEA proportional gain K_P (veh/h per veh/km/lane). If 0, controller
+        behaves as standard ALINEA (integral-only). If > 0, implements P-ALINEA
+        (PI control). Default: 0.0.
     alinea_target_density : Optional[float]
         Target density (veh/km/lane) for ALINEA control. If None, uses 80% of
         jam density of the target cell. Default: None.
@@ -144,6 +148,9 @@ class METANETOnRampConfig:
         Default: None (uses sensible defaults).
     queue_veh : float
         Runtime queue size (veh). Initialized from initial_queue_veh.
+    alinea_previous_error : float
+        Runtime state for P-ALINEA: previous density error for proportional term.
+        Initialized to 0.0.
     """
 
     target_cell: Union[int, str]
@@ -154,6 +161,7 @@ class METANETOnRampConfig:
     name: Optional[str] = None
     alinea_enabled: bool = False
     alinea_gain: float = 50.0
+    alinea_proportional_gain: float = 0.0
     alinea_target_density: Optional[float] = None
     alinea_measurement_cell: Optional[Union[int, str]] = None
     alinea_min_rate: float = 240.0
@@ -163,6 +171,7 @@ class METANETOnRampConfig:
 
     # Runtime state
     queue_veh: float = field(init=False)
+    alinea_previous_error: float = field(init=False)
 
     def __post_init__(self) -> None:
         if not 0 <= self.mainline_priority <= 1:
@@ -180,6 +189,8 @@ class METANETOnRampConfig:
                 )
             if self.alinea_gain <= 0:
                 raise ValueError("alinea_gain must be positive.")
+            if self.alinea_proportional_gain < 0:
+                raise ValueError("alinea_proportional_gain cannot be negative.")
             if self.alinea_min_rate < 0:
                 raise ValueError("alinea_min_rate cannot be negative.")
             if self.alinea_max_rate <= 0:
@@ -192,6 +203,7 @@ class METANETOnRampConfig:
                 raise ValueError("alinea_target_density must be positive.")
         
         self.queue_veh = float(self.initial_queue_veh)
+        self.alinea_previous_error = 0.0
 
 
 def greenshields_speed(
@@ -450,9 +462,15 @@ class METANETSimulation:
         return best_K
 
     def _apply_alinea_control(self, densities: Sequence[float]) -> None:
-        """Apply ALINEA feedback control to update ramp metering rates.
+        """Apply ALINEA or P-ALINEA feedback control to update ramp metering rates.
         
-        ALINEA algorithm: r(k+1) = r(k) + K_R * (ρ_target - ρ_measured)
+        Standard ALINEA (when alinea_proportional_gain == 0):
+            r(k+1) = r(k) + K_I * (ρ_target - ρ_measured)
+        
+        P-ALINEA (when alinea_proportional_gain > 0):
+            e(k) = ρ_target - ρ_measured
+            Δr = K_I * e(k) + K_P * (e(k) - e(k-1))
+            r(k+1) = clip(r(k) + Δr, r_min, r_max)
         
         The measured density is taken from the configured measurement cell.
         
@@ -470,10 +488,21 @@ class METANETSimulation:
             measured_density = densities[measurement_idx]
             target_density = ramp.alinea_target_density
             
-            # ALINEA control law: adjust rate based on density error
-            # K_R is in (veh/h) per (veh/km/lane), so units work out to veh/h
+            # Compute current density error
             density_error = target_density - measured_density
-            rate_adjustment = ramp.alinea_gain * density_error
+            
+            # P-ALINEA control law (incremental PI form)
+            Ki = ramp.alinea_gain
+            Kp = ramp.alinea_proportional_gain
+            
+            # Integral term (always present)
+            integral_term = Ki * density_error
+            
+            # Proportional term (error change)
+            proportional_term = Kp * (density_error - ramp.alinea_previous_error)
+            
+            # Total rate adjustment
+            rate_adjustment = integral_term + proportional_term
             
             # Update metering rate
             current_rate = ramp.meter_rate_veh_per_hour or 0.0
@@ -481,6 +510,9 @@ class METANETSimulation:
             
             # Clamp to min/max bounds
             new_rate = max(ramp.alinea_min_rate, min(new_rate, ramp.alinea_max_rate))
+            
+            # Store current error for next iteration
+            object.__setattr__(ramp, "alinea_previous_error", density_error)
             
             # Update the ramp's metering rate
             object.__setattr__(ramp, "meter_rate_veh_per_hour", new_rate)
@@ -529,6 +561,9 @@ class METANETSimulation:
         }
         ramp_flow_history: Dict[str, List[float]] = {
             ramp.name: [] for ramp in self.on_ramps
+        }
+        ramp_meter_rate_history: Dict[str, List[float]] = {
+            ramp.name: [ramp.meter_rate_veh_per_hour or 0.0] for ramp in self.on_ramps
         }
 
         # Main time-stepping loop
@@ -612,6 +647,7 @@ class METANETSimulation:
             for ramp in self.on_ramps:
                 ramp_flow_history[ramp.name].append(ramp_flows_step[ramp.name])
                 ramp_queue_history[ramp.name].append(ramp.queue_veh)
+                ramp_meter_rate_history[ramp.name].append(ramp.meter_rate_veh_per_hour or 0.0)
 
             # Update densities and speeds using METANET dynamics
             new_densities, new_speeds = self._update_state(
@@ -630,6 +666,7 @@ class METANETSimulation:
             flows=flow_history,
             ramp_queues=ramp_queue_history,
             ramp_flows=ramp_flow_history,
+            ramp_meter_rates=ramp_meter_rate_history,
             time_step_hours=self.dt,
         )
 
