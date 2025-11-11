@@ -408,7 +408,7 @@ class TestMETANETSimulation(unittest.TestCase):
             initial_density_veh_per_km_per_lane=initial_density,
         )
         
-        # Set initial speed to equilibrium
+        # Set initial speed to equilibrium using Greenshields for this test
         v_eq = greenshields_speed(initial_density, 100.0, 160.0)
         for cell in cells:
             object.__setattr__(cell, "initial_speed_kmh", v_eq)
@@ -416,11 +416,13 @@ class TestMETANETSimulation(unittest.TestCase):
         # Inflow = outflow = rho * v * lanes
         steady_flow = initial_density * v_eq * 2.0
         
+        # Use Greenshields equilibrium function to match test setup
         sim = METANETSimulation(
             cells=cells,
             time_step_hours=0.01,
             upstream_demand_profile=steady_flow,
             downstream_supply_profile=steady_flow * 2.0,  # Ample downstream
+            equilibrium_speed_func=greenshields_speed,
         )
         
         result = sim.run(steps=20)
