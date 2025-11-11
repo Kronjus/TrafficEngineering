@@ -605,10 +605,10 @@ class METANETSimulation:
             for idx in range(len(self.cells)):
                 # Demand from upstream (either boundary or previous cell)
                 if idx == 0:
-                    mainline_demand = upstream_demand
+                    mainline_flow_in = min(upstream_demand, self._compute_receiving(densities[idx], self.cells[idx]))
                 else:
                     # Flow from previous cell q_i = rho_i * v_i * lambda_i
-                    mainline_demand = densities[idx-1] * speeds[idx-1] * self.cells[idx-1].lanes
+                    mainline_flow_in = densities[idx-1] * speeds[idx-1] * self.cells[idx-1].lanes
                 
                 ramp_flow = 0.0
                 ramp = self._ramps_by_cell.get(idx)
@@ -625,31 +625,33 @@ class METANETSimulation:
                     # Note: arrivals were already added in _update_ramp_queues
                     # So we just subtract the flow
                     d_i = _get_profile_value(ramp.arrival_rate_profile, step, self.dt)
-                    ramp.queue_veh = ramp.queue_veh - ramp_flow * self.dt + 0.0  # Ensure it was added earlier
-                    # Actually, let's recompute properly:
-                    # We added d_i*T earlier, now subtract r_i*T
                     ramp.queue_veh = max(0.0, ramp.queue_veh - ramp_flow * self.dt)
                     ramp_flows_step[ramp.name] = ramp_flow
                     ramp_flows[idx] = ramp_flow
                     
-                    # Determine mainline flow considering ramp merge
-                    # Use receiving capacity for total
+                    # In pure METANET, flows simply add up (no capacity-based merging)
+                    # But we still need to respect receiving capacity for stability
                     receiving = self._compute_receiving(densities[idx], self.cells[idx])
-                    main_flow, actual_ramp_flow = self._merge_flows(
-                        mainline_demand,
-                        ramp_flow,
-                        receiving,
-                        ramp.mainline_priority,
-                    )
-                    # If ramp flow was reduced, adjust queue accordingly
-                    if actual_ramp_flow < ramp_flow:
-                        ramp.queue_veh += (ramp_flow - actual_ramp_flow) * self.dt
-                        ramp_flow = actual_ramp_flow
-                        ramp_flows_step[ramp.name] = ramp_flow
-                        ramp_flows[idx] = ramp_flow
+                    total_demand = mainline_flow_in + ramp_flow
+                    if total_demand > receiving:
+                        # Split the available receiving capacity by priority
+                        main_flow, actual_ramp_flow = self._merge_flows(
+                            mainline_flow_in,
+                            ramp_flow,
+                            receiving,
+                            ramp.mainline_priority,
+                        )
+                        # If ramp flow was reduced, adjust queue accordingly
+                        if actual_ramp_flow < ramp_flow:
+                            ramp.queue_veh += (ramp_flow - actual_ramp_flow) * self.dt
+                            ramp_flow = actual_ramp_flow
+                            ramp_flows_step[ramp.name] = ramp_flow
+                            ramp_flows[idx] = ramp_flow
+                    else:
+                        main_flow = mainline_flow_in
+
                 else:
-                    receiving = self._compute_receiving(densities[idx], self.cells[idx])
-                    main_flow = min(mainline_demand, receiving)
+                    main_flow = mainline_flow_in
 
                 inflow = main_flow + ramp_flow
                 inflows[idx] = inflow
