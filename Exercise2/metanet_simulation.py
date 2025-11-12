@@ -11,6 +11,90 @@ and API of the CTM simulation, supporting:
 
 The implementation focuses on clarity and pedagogical value while providing
 a complete METANET simulation framework compatible with the existing CTM API.
+
+UNIT CONVENTIONS
+----------------
+This module uses consistent physical units throughout:
+
+Time:
+  - time_step_hours (dt, T): hours
+  - tau_s: seconds (converted to hours internally as tau_hours = tau_s / 3600.0)
+
+Space and Lanes:
+  - length_km (L_i): kilometres
+  - lanes (lambda_i): dimensionless count
+
+Density:
+  - density (rho): veh/km/lane (per-lane density)
+  - This is stored as per-lane density to simplify fundamental diagram calculations.
+  - When lane counts change, density remains in veh/km/lane (not total veh/km).
+
+Speed:
+  - speed (v): km/h
+
+Flow:
+  - flows (q, inflow, outflow, ramp_flow): veh/h (TOTAL flow across all lanes)
+  - Flow is computed as: q = rho * v * lanes (veh/km/lane * km/h * lanes = veh/h)
+  - Profiles (upstream_demand, downstream_supply, arrival_rate): veh/h
+
+Queue:
+  - ramp queues (N_i, queue_veh): vehicles (count, not rate)
+  - Queue update: N(k+1) = N(k) + T * d(k) - T * r(k)
+    where d(k) and r(k) are in veh/h, T is in hours, so T*d is vehicles.
+
+Parameters:
+  - nu: km²/h (anticipation coefficient)
+  - kappa: veh/km/lane (regularization constant)
+  - delta: dimensionless (ramp coupling parameter)
+  - capacity_veh_per_hour_per_lane: veh/h/lane
+  - max_ramp_flow_veh_per_hour: veh/h
+
+ALINEA Control:
+  - alinea_gain (K_R): (veh/h) per (veh/km/lane)
+    So: rate_adjustment = K_R * (target_density - measured_density)
+    has units: ((veh/h)/(veh/km/lane)) * (veh/km/lane) = veh/h ✓
+  - alinea_target_density: veh/km/lane
+  - alinea_min_rate, alinea_max_rate: veh/h
+
+CRITICAL NOTES FOR LANE DROPS/INCREASES
+----------------------------------------
+When the number of lanes changes between cells:
+
+1. Density remains per-lane (veh/km/lane), NOT total density (veh/km).
+   This allows fundamental diagrams to remain consistent across lane changes.
+
+2. Flow is computed as TOTAL flow: q = rho * v * lanes (veh/h).
+   This accounts for the lane factor when computing actual vehicle movement.
+
+3. Density update uses: d_rho = (T / (L * lanes)) * (inflow - outflow)
+   The division by lanes ensures the per-lane density is correctly updated
+   from total flows. This is the KEY to vehicle conservation:
+   - inflow, outflow are in veh/h (total)
+   - T * (inflow - outflow) gives vehicles (count)
+   - Dividing by (L * lanes) gives veh/(km * lanes) = veh/km/lane ✓
+
+4. Example: 3 lanes -> 2 lanes (lane drop)
+   - Cell 0 has 3 lanes with density rho_0 = 40 veh/km/lane
+   - Flow out of cell 0: q_0 = 40 * 80 * 3 = 9600 veh/h
+   - This flow enters cell 1 (2 lanes)
+   - Density change in cell 1: d_rho_1 = (T/(L*2)) * 9600
+   - The factor of 2 (not 3) correctly accounts for cell 1's lane count.
+
+PROFILE EXPECTATIONS
+--------------------
+All profile functions (upstream_demand, arrival_rate, downstream_supply)
+must return flow rates in veh/h, NOT vehicles per time step.
+
+Common error: If a profile returns 100 when you mean 100 vehicles per 
+time step (dt=0.1 hours), the code will interpret this as 100 veh/h,
+resulting in only 10 vehicles per step—off by a factor of 1/dt.
+
+To diagnose: Use the built-in _diagnose_profile_units() method, which
+warns if profile values appear to be in wrong units.
+
+To fix: Either:
+  - Multiply profile values by (1/dt) to convert per-step to per-hour, OR
+  - Ensure profiles already return veh/h (recommended)
 """
 
 from __future__ import annotations
@@ -322,6 +406,16 @@ class METANETSimulation:
             raise ValueError("time_step_hours must be positive.")
         if not cells:
             raise ValueError("At least one cell configuration is required.")
+        
+        # Unit validation: time step should be in hours (typically 0.001 to 0.1)
+        if time_step_hours > 1.0:
+            import warnings
+            warnings.warn(
+                f"time_step_hours={time_step_hours} is unusually large. "
+                f"Expected range: 0.001 to 0.1 hours. "
+                f"Ensure this is in hours, not seconds.",
+                UserWarning
+            )
 
         self.cells: List[METANETCellConfig] = list(cells)
         self.dt = float(time_step_hours)
@@ -372,6 +466,68 @@ class METANETSimulation:
                     # Resolve the measurement cell
                     measurement_idx = self._resolve_target_index(ramp.alinea_measurement_cell)
                 object.__setattr__(ramp, "alinea_measurement_cell", measurement_idx)
+        
+        # Diagnose profile units to detect common errors
+        self._diagnose_profile_units(self.upstream_profile, "upstream_demand_profile")
+        if self.downstream_profile is not None:
+            self._diagnose_profile_units(self.downstream_profile, "downstream_supply_profile")
+        for ramp in self.on_ramps:
+            self._diagnose_profile_units(
+                ramp.arrival_rate_profile, 
+                f"on_ramp '{ramp.name}' arrival_rate_profile"
+            )
+
+    def _diagnose_profile_units(self, profile: Profile, name: str) -> None:
+        """Diagnose whether a profile returns veh/h or veh per time step.
+        
+        This heuristic check helps detect common unit errors where profiles
+        return vehicles per time step instead of the expected veh/h.
+        
+        Parameters
+        ----------
+        profile : Profile
+            The profile to check (constant, list, or callable).
+        name : str
+            Human-readable name for error messages.
+        
+        Warnings
+        --------
+        UserWarning
+            If the profile appears to return veh per time step instead of veh/h.
+        """
+        import warnings
+        
+        try:
+            sample = _get_profile_value(profile, 0, self.dt)
+        except Exception:
+            # Can't diagnose, skip
+            return
+        
+        if sample is None or sample <= 0:
+            return
+        
+        # Heuristic: if sample is small (< 10) but sample*dt would be tiny (< 0.1),
+        # the profile is likely returning per-step values when it should return veh/h
+        arrivals_per_step = sample * self.dt
+        
+        # Case 1: sample is small and arrivals_per_step is also small -> likely per-step units
+        if sample < 10.0 and arrivals_per_step < 0.5:
+            warnings.warn(
+                f"Profile '{name}' may be in vehicles per time-step "
+                f"(sample value={sample:.2f}, dt={self.dt}).\n"
+                f"Code expects veh/h. If {sample:.2f} is vehicles per step, "
+                f"multiply your profile values by (1/dt) = {1.0/self.dt:.1f}.",
+                UserWarning
+            )
+        
+        # Case 2: very large sample (> 100000) might indicate wrong units
+        if sample > 100000.0:
+            warnings.warn(
+                f"Profile '{name}' returns very large value ({sample:.0f}).\n"
+                f"Ensure this is in veh/h, not veh/s or other units.",
+                UserWarning
+            )
+
 
     def _resolve_target_index(self, target: Union[int, str]) -> int:
         """Resolve an on-ramp target to an integer index."""
@@ -607,7 +763,9 @@ class METANETSimulation:
                 if idx == 0:
                     mainline_flow_in = min(upstream_demand, self._compute_receiving(densities[idx], self.cells[idx]))
                 else:
-                    # Flow from previous cell q_i = rho_i * v_i * lambda_i
+                    # Flow from previous cell: q_i = rho_i * v_i * lambda_i
+                    # Units: (veh/km/lane) * (km/h) * lanes = veh/h (total flow)
+                    # This correctly accounts for lane count in flow calculation.
                     mainline_flow_in = densities[idx-1] * speeds[idx-1] * self.cells[idx-1].lanes
                 
                 ramp_flow = 0.0
@@ -621,9 +779,11 @@ class METANETSimulation:
                         step
                     )
                     
-                    # Update ramp queue: N_i(k+1) = N_i(k) + T*(d_i(k) - r_i(k))
+                    # Update ramp queue: N_i(k+1) = N_i(k) + T*d_i(k) - T*r_i(k)
                     # Note: arrivals were already added in _update_ramp_queues
-                    # So we just subtract the flow
+                    # Here we subtract the admitted flow
+                    # Units: queue_veh in vehicles, ramp_flow in veh/h, dt in hours
+                    #        -> vehicles - (veh/h * hours) = vehicles ✓
                     d_i = _get_profile_value(ramp.arrival_rate_profile, step, self.dt)
                     ramp.queue_veh = max(0.0, ramp.queue_veh - ramp_flow * self.dt)
                     ramp_flows_step[ramp.name] = ramp_flow
@@ -642,6 +802,9 @@ class METANETSimulation:
                             ramp.mainline_priority,
                         )
                         # If ramp flow was reduced, adjust queue accordingly
+                        # Add back the vehicles that couldn't be admitted
+                        # Units: (ramp_flow - actual_ramp_flow) in veh/h, dt in hours
+                        #        -> veh/h * hours = vehicles ✓
                         if actual_ramp_flow < ramp_flow:
                             ramp.queue_veh += (ramp_flow - actual_ramp_flow) * self.dt
                             ramp_flow = actual_ramp_flow
@@ -661,6 +824,7 @@ class METANETSimulation:
 
             # Handle flow out of the last cell
             last_idx = len(self.cells) - 1
+            # Total flow: density * speed * lanes (veh/km/lane * km/h * lanes = veh/h)
             last_flow = densities[last_idx] * speeds[last_idx] * self.cells[last_idx].lanes
             last_flow = min(last_flow, self.cells[last_idx].capacity_veh_per_hour_per_lane * self.cells[last_idx].lanes)
             outflow_last = min(last_flow, downstream_supply)
@@ -698,7 +862,14 @@ class METANETSimulation:
     def _compute_flows(
         self, densities: Sequence[float], speeds: Sequence[float]
     ) -> List[float]:
-        """Compute flows q_i = rho_i * v_i * lanes for each cell."""
+        """Compute flows q_i = rho_i * v_i * lanes for each cell.
+        
+        Units:
+        - rho_i: veh/km/lane
+        - v_i: km/h
+        - lanes: dimensionless
+        - flow: (veh/km/lane) * (km/h) * lanes = veh/h (total flow) ✓
+        """
         flows = []
         for idx, (rho, v, cell) in enumerate(zip(densities, speeds, self.cells)):
             flow = rho * v * cell.lanes  # veh/km/lane * km/h * lanes = veh/h
@@ -743,14 +914,24 @@ class METANETSimulation:
         -------
         float
             Ramp flow in veh/h
+            
+        Units
+        -----
+        - d_i: veh/h (arrival demand from profile)
+        - N_i: vehicles (queue)
+        - T: hours (time step)
+        - N_i/T: veh/h (queue discharge rate)
+        - Q_max_ramp, Q_max_i: veh/h (capacities)
+        - All terms have units veh/h, return value is veh/h ✓
         """
-        # Get arrival demand d_i(k)
+        # Get arrival demand d_i(k) in veh/h
         d_i = _get_profile_value(ramp.arrival_rate_profile, step, self.dt)
         
-        # Maximum ramp flow capacity Q_max_ramp
+        # Maximum ramp flow capacity Q_max_ramp (veh/h)
         Q_max_ramp = target_cell.max_ramp_flow_veh_per_hour
         
         # Supply-limited mainline capacity Q_max_i * (rho_jam - rho_i) / (rho_jam - rho_cr)
+        # All density terms cancel out, result is in veh/h
         rho_jam = target_cell.jam_density_veh_per_km_per_lane
         rho_cr = target_cell.critical_density_veh_per_km_per_lane
         Q_max_i = target_cell.capacity_veh_per_hour_per_lane * target_cell.lanes
@@ -762,29 +943,37 @@ class METANETSimulation:
         supply_limited_flow = max(0.0, supply_limited_flow)
         
         # Queue-limited demand: d_i(k) + N_i(k) / T
+        # Units: veh/h + vehicles/hours = veh/h ✓
         queue_limited_demand = d_i + ramp.queue_veh / self.dt
         
-        # Take minimum of all three constraints
+        # Take minimum of all three constraints (all in veh/h)
         r_i = min(Q_max_ramp, supply_limited_flow, queue_limited_demand)
         r_i = max(0.0, r_i)
         
-        # Apply metering if configured
+        # Apply metering if configured (veh/h)
         if ramp.meter_rate_veh_per_hour is not None:
             r_i = min(r_i, ramp.meter_rate_veh_per_hour)
         
         return r_i
 
     def _update_ramp_queues(self, step: int) -> Dict[str, float]:
-        """Update on-ramp queues and compute ramp flows.
+        """Update on-ramp queues by adding arrivals.
         
-        N_i(k+1) = N_i(k) + T * (d_i(k) - r_i(k))
+        Implements: N_i(k+1) = N_i(k) + T * d_i(k)
+        (The subtraction of r_i(k) happens later in the main loop)
+        
+        Units:
+        - N_i (queue_veh): vehicles
+        - d_i: veh/h (from profile)
+        - T (self.dt): hours
+        - T * d_i: vehicles ✓
         """
         ramp_flows: Dict[str, float] = {}
         for ramp in self.on_ramps:
-            # Get arrival demand
+            # Get arrival demand d_i(k) in veh/h
             d_i = _get_profile_value(ramp.arrival_rate_profile, step, self.dt)
             
-            # Add arrivals to queue
+            # Add arrivals to queue: arrivals = (veh/h) * hours = vehicles
             ramp.queue_veh += d_i * self.dt
             
             # Ramp flow will be computed during merge, just store placeholder
@@ -851,6 +1040,20 @@ class METANETSimulation:
                           - T*delta/(L_i*lambda_i) * r_i(k) * v_i(k) / (rho_i(k) + kappa)
         - Flow: q_i(k) = rho_i(k) * v_i(k) * lambda_i
         - Equilibrium speed: V_s(rho) = v_f * exp(-1/2 * (rho/rho_cr)^2)
+        
+        UNIT SUMMARY:
+        -------------
+        All inputs and outputs use consistent units:
+        - densities: veh/km/lane (per-lane density)
+        - speeds: km/h
+        - inflows, outflows, ramp_flows: veh/h (total flow across all lanes)
+        - T (self.dt): hours
+        - L_i: km
+        - lambda_i: lanes (dimensionless count)
+        
+        CRITICAL: The density update divides by (L_i * lambda_i) to convert
+        total flow (veh/h) to per-lane density change (veh/km/lane). This
+        ensures correct vehicle conservation when lane counts change between cells.
         """
         new_densities = []
         new_speeds = []
@@ -863,16 +1066,23 @@ class METANETSimulation:
             lambda_i = cell.lanes
             
             # Get actual flows (already computed in main loop accounting for constraints)
-            # inflow and outflow are total flows in veh/h (already include lane factor)
-            # To convert to per-lane density change, divide by lambda_i
+            # Units clarification:
+            # - inflow_total, outflow_total: veh/h (total flow across all lanes)
+            # - r_i: veh/h (ramp flow)
+            # - rho: veh/km/lane (per-lane density)
+            # - L_i: km (cell length)
+            # - lambda_i: dimensionless (number of lanes)
             inflow_total = inflows[idx]  # veh/h
             outflow_total = outflows[idx]  # veh/h
             r_i = ramp_flows[idx]  # veh/h
             s_i = 0.0  # Off-ramp flow (not specified, assume 0)
             
             # Update density: rho_i(k+1) = rho_i(k) + T/(L_i * lambda_i) * (inflow_total - outflow_total - s_i)
-            # Since inflow_total and outflow_total are total flows (veh/h), and we want per-lane density (veh/km/lane),
-            # we divide by (L_i * lambda_i) to convert from total veh to veh/km/lane
+            # Unit derivation:
+            #   - Net flow = (inflow_total - outflow_total - s_i) in veh/h
+            #   - T/(L_i * lambda_i) in hours/(km * lanes)
+            #   - hours/(km * lanes) * veh/h = veh/(km * lanes) = veh/km/lane ✓
+            # This converts total flow (veh/h) to per-lane density change (veh/km/lane)
             d_rho = (self.dt / (L_i * lambda_i)) * (inflow_total - outflow_total - s_i)
             new_rho = rho + d_rho
             new_rho = max(0.0, min(new_rho, cell.jam_density_veh_per_km_per_lane))
@@ -889,9 +1099,15 @@ class METANETSimulation:
             )
             
             # Relaxation term: T/tau * (V_s(rho_i) - v_i)
+            # Units: (1/tau_hours) in 1/hours, (V_s - v) in km/h
+            #        -> (1/hours) * (km/h) = km/h² (acceleration)
+            # When multiplied by T (hours), gives speed change in km/h ✓
             relaxation_term = (1.0 / tau_hours) * (V_s - v)
             
             # Convection term: T/L_i * v_i * (v_{i-1} - v_i)
+            # Units: (1/L_i) in 1/km, v_i in km/h, (v_{i-1} - v_i) in km/h
+            #        -> (1/km) * (km/h) * (km/h) = km/h² (acceleration)
+            # When multiplied by T (hours), gives speed change in km/h ✓
             if idx > 0:
                 v_i_minus_1 = speeds[idx - 1]
                 convection_term = (v / L_i) * (v_i_minus_1 - v)
@@ -899,6 +1115,11 @@ class METANETSimulation:
                 convection_term = 0.0
             
             # Anticipation/gradient term: -T*nu/(tau*L_i) * (rho_{i+1} - rho_i) / (rho_i + kappa)
+            # Units: nu in km²/h, tau_hours in hours, L_i in km
+            #        rho in veh/km/lane, kappa in veh/km/lane
+            #        -> (km²/h) / (hours * km) * (veh/km/lane) / (veh/km/lane)
+            #        -> (km/h) / hours * dimensionless = km/h² (acceleration)
+            # When multiplied by T (hours), gives speed change in km/h ✓
             if idx < len(self.cells) - 1:
                 rho_i_plus_1 = densities[idx + 1]
                 anticipation_term = -(cell.nu / (tau_hours * L_i)) * (
@@ -908,6 +1129,14 @@ class METANETSimulation:
                 anticipation_term = 0.0
             
             # Ramp coupling term: -T*delta/(L_i*lambda_i) * r_i * v_i / (rho_i + kappa)
+            # Units: delta dimensionless, L_i in km, lambda_i dimensionless
+            #        r_i in veh/h, v_i in km/h, rho in veh/km/lane, kappa in veh/km/lane
+            #        -> (1/(km * lanes)) * (veh/h) * (km/h) / (veh/km/lane)
+            #        -> (veh*km)/(h * km * lanes) / (veh/km/lane)
+            #        -> (veh/h/lanes) * (lane*km/veh) = km/h (per lane)
+            #        -> km/h / lanes, but delta accounts for merging dynamics
+            # The factor 1/lambda_i ensures proper scaling when lanes change.
+            # When multiplied by T (hours), gives speed change in km/h ✓
             if r_i > 0:
                 ramp_coupling_term = -(cell.delta / (L_i * lambda_i)) * (
                     r_i * v / (rho_safe + cell.kappa)
