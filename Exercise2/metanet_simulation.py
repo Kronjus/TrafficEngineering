@@ -1088,7 +1088,7 @@ class METANETSimulation:
             new_rho = max(0.0, min(new_rho, cell.jam_density_veh_per_km_per_lane))
             
             # Prepare for speed update
-            rho_safe = max(rho, 0.1)  # Avoid division by zero
+            rho_safe = max(rho, 1e-6)  # Avoid division by zero
             tau_hours = cell.tau_s / 3600.0  # Convert tau from seconds to hours
             
             # Equilibrium speed: V_s(rho) = v_f * exp(-1/2 * (rho/rho_cr)^2)

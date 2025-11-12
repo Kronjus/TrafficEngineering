@@ -20,7 +20,7 @@ from metanet_simulation import (
     SimulationResult,
     build_uniform_metanet_mainline,
     run_basic_metanet_scenario,
-    greenshields_speed,
+    mfd_speed,
 )
 
 
@@ -201,40 +201,40 @@ class TestGreenshieldsSpeed(unittest.TestCase):
 
     def test_zero_density(self):
         """Test that V(0) = v_f."""
-        v = greenshields_speed(0.0, 100.0, 160.0)
+        v = mfd_speed(0.0, 100.0, 160.0)
         self.assertAlmostEqual(v, 100.0)
 
     def test_jam_density(self):
         """Test that V(rho_jam) = 0."""
-        v = greenshields_speed(160.0, 100.0, 160.0)
+        v = mfd_speed(160.0, 100.0, 160.0)
         self.assertAlmostEqual(v, 0.0)
 
     def test_half_jam_density(self):
         """Test that V(rho_jam/2) = v_f/2 when delta=1."""
-        v = greenshields_speed(80.0, 100.0, 160.0, delta=1.0)
+        v = mfd_speed(80.0, 100.0, 160.0, delta=1.0)
         self.assertAlmostEqual(v, 50.0)
 
     def test_speed_bounds(self):
         """Test that speed is bounded by [0, v_f]."""
-        v = greenshields_speed(200.0, 100.0, 160.0)  # Density > jam
+        v = mfd_speed(200.0, 100.0, 160.0)  # Density > jam
         self.assertAlmostEqual(v, 0.0)
 
     def test_delta_nonlinearity(self):
         """Test that delta creates nonlinear speed-density relationship."""
         # With delta=2, relationship is more nonlinear
-        v_delta1 = greenshields_speed(80.0, 100.0, 160.0, delta=1.0)
-        v_delta2 = greenshields_speed(80.0, 100.0, 160.0, delta=2.0)
+        v_delta1 = mfd_speed(80.0, 100.0, 160.0, delta=1.0)
+        v_delta2 = mfd_speed(80.0, 100.0, 160.0, delta=2.0)
         # delta=2 should give higher speed at same density (less reduction)
         self.assertGreater(v_delta2, v_delta1)
         
     def test_delta_extremes(self):
         """Test that delta affects speed at critical and jam density."""
         # At jam density, speed should be 0 regardless of delta
-        v_jam = greenshields_speed(160.0, 100.0, 160.0, delta=3.0)
+        v_jam = mfd_speed(160.0, 100.0, 160.0, delta=3.0)
         self.assertAlmostEqual(v_jam, 0.0)
         
         # At zero density, speed should be v_f regardless of delta
-        v_zero = greenshields_speed(0.0, 100.0, 160.0, delta=3.0)
+        v_zero = mfd_speed(0.0, 100.0, 160.0, delta=3.0)
         self.assertAlmostEqual(v_zero, 100.0)
 
 
@@ -409,7 +409,7 @@ class TestMETANETSimulation(unittest.TestCase):
         )
         
         # Set initial speed to equilibrium using Greenshields for this test
-        v_eq = greenshields_speed(initial_density, 100.0, 160.0)
+        v_eq = mfd_speed(initial_density, 100.0, 160.0)
         for cell in cells:
             object.__setattr__(cell, "initial_speed_kmh", v_eq)
         
@@ -613,7 +613,7 @@ class TestSpeedDynamics(unittest.TestCase):
     def test_relaxation_to_equilibrium(self):
         """Test that speed relaxes toward equilibrium."""
         initial_density = 50.0
-        v_eq = greenshields_speed(50.0, 100.0, 160.0)
+        v_eq = mfd_speed(50.0, 100.0, 160.0)
         
         cells = build_uniform_metanet_mainline(
             num_cells=1,
@@ -765,8 +765,8 @@ class TestParameterUsage(unittest.TestCase):
         self.assertEqual(cells_nonlinear[0].delta, 2.0)
         
         # Compute equilibrium speeds
-        v_linear = greenshields_speed(80.0, 100.0, 160.0, delta=1.0)
-        v_nonlinear = greenshields_speed(80.0, 100.0, 160.0, delta=2.0)
+        v_linear = mfd_speed(80.0, 100.0, 160.0, delta=1.0)
+        v_nonlinear = mfd_speed(80.0, 100.0, 160.0, delta=2.0)
         
         # With delta=2, speed should be higher at same density
         self.assertGreater(v_nonlinear, v_linear)
