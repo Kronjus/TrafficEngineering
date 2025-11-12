@@ -40,11 +40,13 @@ class METANETCellConfig:
     - lanes: Number of traffic lanes in the cell (integer, must be > 0).
     - free_flow_speed_kmh: Free-flow speed v_f in km/h (must be > 0).
     - jam_density_veh_per_km_per_lane: Jam density ρ_jam per lane in veh/km (must be > 0).
+    - critical_density_veh_per_km_per_lane: Critical density ρ_cr per lane in veh/km (must be > 0).
     - tau_s: Relaxation time τ in seconds (must be > 0), typically 10-30s.
     - nu: Anticipation/diffusion coefficient ν in km²/h (must be >= 0), typically small.
     - kappa: Regularization constant κ in veh/km/lane (must be > 0), small positive value.
-    - delta: Dimensionless exponent (must be > 0) for equilibrium speed function, typically 1-4.
+    - delta: Dimensionless parameter for ramp metering coupling (must be > 0), typically 0.0122.
     - capacity_veh_per_hour_per_lane: Per-lane capacity in veh/h (must be > 0).
+    - max_ramp_flow_veh_per_hour: Maximum ramp flow Q_max_ramp in veh/h (must be > 0), default 2000.0.
     - initial_density_veh_per_km_per_lane: Initial density per lane in veh/km (>= 0).
     - initial_speed_kmh: Initial speed in km/h (>= 0, <= free_flow_speed_kmh).
 
@@ -62,11 +64,13 @@ class METANETCellConfig:
     lanes: int
     free_flow_speed_kmh: float
     jam_density_veh_per_km_per_lane: float
+    critical_density_veh_per_km_per_lane: float = 33.5  # Critical density (veh/km/lane)
     tau_s: float = 18.0  # Relaxation time in seconds
     nu: float = 60.0  # Anticipation coefficient (km²/h)
     kappa: float = 40.0  # Regularization constant (veh/km/lane)
-    delta: float = 1.0  # Dimensionless exponent for equilibrium speed
+    delta: float = 0.0122  # Ramp metering coupling parameter
     capacity_veh_per_hour_per_lane: float = 2200.0
+    max_ramp_flow_veh_per_hour: float = 2000.0  # Maximum ramp flow (veh/h)
     initial_density_veh_per_km_per_lane: float = 0.0
     initial_speed_kmh: float = 0.0  # Will be set to V(rho) if 0
 
@@ -80,10 +84,12 @@ class METANETCellConfig:
             ("length_km", self.length_km),
             ("free_flow_speed_kmh", self.free_flow_speed_kmh),
             ("jam_density_veh_per_km_per_lane", self.jam_density_veh_per_km_per_lane),
+            ("critical_density_veh_per_km_per_lane", self.critical_density_veh_per_km_per_lane),
             ("tau_s", self.tau_s),
             ("kappa", self.kappa),
             ("delta", self.delta),
             ("capacity_veh_per_hour_per_lane", self.capacity_veh_per_hour_per_lane),
+            ("max_ramp_flow_veh_per_hour", self.max_ramp_flow_veh_per_hour),
         ]:
             if attr_val <= 0:
                 raise ValueError(f"{attr_name} must be positive.")
@@ -194,6 +200,38 @@ class METANETOnRampConfig:
         self.queue_veh = float(self.initial_queue_veh)
 
 
+def exponential_equilibrium_speed(
+    density: float,
+    free_flow_speed_kmh: float,
+    critical_density: float,
+) -> float:
+    """Compute equilibrium speed using exponential model.
+
+    V_s(ρ) = v_f * exp(-1/2 * (ρ / ρ_cr)^2)
+
+    This is the standard METANET equilibrium speed function.
+
+    Parameters
+    ----------
+    density : float
+        Current density in veh/km/lane.
+    free_flow_speed_kmh : float
+        Free-flow speed in km/h.
+    critical_density : float
+        Critical density in veh/km/lane.
+
+    Returns
+    -------
+    float
+        Equilibrium speed in km/h, clamped to [0, v_f].
+    """
+    if critical_density <= 0:
+        return free_flow_speed_kmh
+    ratio = density / critical_density
+    speed = free_flow_speed_kmh * math.exp(-0.5 * ratio * ratio)
+    return max(0.0, min(speed, free_flow_speed_kmh))
+
+
 def greenshields_speed(
     density: float,
     free_flow_speed_kmh: float,
@@ -206,6 +244,8 @@ def greenshields_speed(
 
     When delta=1, this reduces to the classic linear Greenshields model.
     Higher values of delta create more nonlinear speed-density relationships.
+
+    This function is kept for backward compatibility.
 
     Parameters
     ----------
@@ -270,8 +310,8 @@ class METANETSimulation:
         on_ramps:
             Optional sequence of METANETOnRampConfig.
         equilibrium_speed_func:
-            Optional function V(rho, v_f, rho_jam) -> speed_kmh.
-            Defaults to Greenshields' model if not provided.
+            Optional function V(rho, v_f, rho_cr) -> speed_kmh.
+            Defaults to exponential equilibrium speed if not provided.
 
         Raises
         ------
@@ -289,7 +329,7 @@ class METANETSimulation:
         self.downstream_profile = downstream_supply_profile
 
         # Set equilibrium speed function
-        self.equilibrium_speed = equilibrium_speed_func or greenshields_speed
+        self.equilibrium_speed = equilibrium_speed_func or exponential_equilibrium_speed
 
         # Map cell names to indices
         self._cell_index: Dict[str, int] = {
@@ -514,8 +554,7 @@ class METANETSimulation:
                 v_eq = self.equilibrium_speed(
                     densities[idx],
                     cell.free_flow_speed_kmh,
-                    cell.jam_density_veh_per_km_per_lane,
-                    cell.delta,
+                    cell.critical_density_veh_per_km_per_lane,
                 )
                 speeds.append(max(1.0, v_eq))  # Ensure non-zero initial speed
 
@@ -536,8 +575,8 @@ class METANETSimulation:
             # Apply ALINEA feedback control if enabled
             self._apply_alinea_control(densities)
             
-            # Update on-ramp queues and get potential ramp flows
-            ramp_potentials = self._update_ramp_queues(step)
+            # Update on-ramp queues (add arrivals)
+            ramp_flows_placeholder = self._update_ramp_queues(step)
             ramp_flows_step: Dict[str, float] = {
                 ramp.name: 0.0 for ramp in self.on_ramps
             }
@@ -557,39 +596,62 @@ class METANETSimulation:
             )
             downstream_supply = max(0.0, min(downstream_supply_raw, max_downstream_flow))
 
-            # Prepare inflow/outflow accumulators
+            # Prepare inflow/outflow accumulators and store ramp flows
             inflows = [0.0] * len(self.cells)
             outflows = [0.0] * len(self.cells)
+            ramp_flows = [0.0] * len(self.cells)  # Track ramp flow per cell
 
             # Compute flows into each cell
             for idx in range(len(self.cells)):
-                # Receiving capacity based on available space
-                receiving = self._compute_receiving(densities[idx], self.cells[idx])
-                
                 # Demand from upstream (either boundary or previous cell)
                 if idx == 0:
-                    mainline_demand = upstream_demand
+                    mainline_flow_in = min(upstream_demand, self._compute_receiving(densities[idx], self.cells[idx]))
                 else:
-                    # Flow from previous cell = min(sending, previous receiving)
-                    mainline_demand = densities[idx-1] * speeds[idx-1] * self.cells[idx-1].lanes
-                    mainline_demand = min(mainline_demand, self.cells[idx-1].capacity_veh_per_hour_per_lane * self.cells[idx-1].lanes)
+                    # Flow from previous cell q_i = rho_i * v_i * lambda_i
+                    mainline_flow_in = densities[idx-1] * speeds[idx-1] * self.cells[idx-1].lanes
                 
                 ramp_flow = 0.0
                 ramp = self._ramps_by_cell.get(idx)
                 if ramp is not None:
-                    # Merge mainline and ramp
-                    potential = ramp_potentials[ramp.name]
-                    main_flow, ramp_flow = self._merge_flows(
-                        mainline_demand,
-                        potential,
-                        receiving,
-                        ramp.mainline_priority,
+                    # Compute ramp flow using METANET formula
+                    ramp_flow = self._compute_ramp_flow(
+                        ramp, 
+                        self.cells[idx], 
+                        densities[idx],
+                        step
                     )
-                    # Dequeue ramp vehicles
+                    
+                    # Update ramp queue: N_i(k+1) = N_i(k) + T*(d_i(k) - r_i(k))
+                    # Note: arrivals were already added in _update_ramp_queues
+                    # So we just subtract the flow
+                    d_i = _get_profile_value(ramp.arrival_rate_profile, step, self.dt)
                     ramp.queue_veh = max(0.0, ramp.queue_veh - ramp_flow * self.dt)
                     ramp_flows_step[ramp.name] = ramp_flow
+                    ramp_flows[idx] = ramp_flow
+                    
+                    # In pure METANET, flows simply add up (no capacity-based merging)
+                    # But we still need to respect receiving capacity for stability
+                    receiving = self._compute_receiving(densities[idx], self.cells[idx])
+                    total_demand = mainline_flow_in + ramp_flow
+                    if total_demand > receiving:
+                        # Split the available receiving capacity by priority
+                        main_flow, actual_ramp_flow = self._merge_flows(
+                            mainline_flow_in,
+                            ramp_flow,
+                            receiving,
+                            ramp.mainline_priority,
+                        )
+                        # If ramp flow was reduced, adjust queue accordingly
+                        if actual_ramp_flow < ramp_flow:
+                            ramp.queue_veh += (ramp_flow - actual_ramp_flow) * self.dt
+                            ramp_flow = actual_ramp_flow
+                            ramp_flows_step[ramp.name] = ramp_flow
+                            ramp_flows[idx] = ramp_flow
+                    else:
+                        main_flow = mainline_flow_in
+
                 else:
-                    main_flow = min(mainline_demand, receiving)
+                    main_flow = mainline_flow_in
 
                 inflow = main_flow + ramp_flow
                 inflows[idx] = inflow
@@ -615,7 +677,7 @@ class METANETSimulation:
 
             # Update densities and speeds using METANET dynamics
             new_densities, new_speeds = self._update_state(
-                densities, speeds, inflows, outflows
+                densities, speeds, inflows, outflows, ramp_flows
             )
             densities = new_densities
             speeds = new_speeds
@@ -655,18 +717,79 @@ class METANETSimulation:
         supply = congestion_wave_speed_kmh * remaining_density * cell.lanes
         return min(supply, total_capacity)
 
+    def _compute_ramp_flow(
+        self, 
+        ramp: METANETOnRampConfig, 
+        target_cell: METANETCellConfig,
+        target_density: float,
+        step: int
+    ) -> float:
+        """Compute ramp flow according to METANET specification.
+        
+        r_i(k) = min(Q_max_ramp, Q_max_i*(rho_jam-rho_i)/(rho_jam-rho_cr), d_i + N_i/T)
+        
+        Parameters
+        ----------
+        ramp : METANETOnRampConfig
+            The on-ramp configuration
+        target_cell : METANETCellConfig
+            The mainline cell receiving the ramp flow
+        target_density : float
+            Current density at target cell (veh/km/lane)
+        step : int
+            Current time step
+            
+        Returns
+        -------
+        float
+            Ramp flow in veh/h
+        """
+        # Get arrival demand d_i(k)
+        d_i = _get_profile_value(ramp.arrival_rate_profile, step, self.dt)
+        
+        # Maximum ramp flow capacity Q_max_ramp
+        Q_max_ramp = target_cell.max_ramp_flow_veh_per_hour
+        
+        # Supply-limited mainline capacity Q_max_i * (rho_jam - rho_i) / (rho_jam - rho_cr)
+        rho_jam = target_cell.jam_density_veh_per_km_per_lane
+        rho_cr = target_cell.critical_density_veh_per_km_per_lane
+        Q_max_i = target_cell.capacity_veh_per_hour_per_lane * target_cell.lanes
+        
+        if rho_jam > rho_cr:
+            supply_limited_flow = Q_max_i * (rho_jam - target_density) / (rho_jam - rho_cr)
+        else:
+            supply_limited_flow = Q_max_i
+        supply_limited_flow = max(0.0, supply_limited_flow)
+        
+        # Queue-limited demand: d_i(k) + N_i(k) / T
+        queue_limited_demand = d_i + ramp.queue_veh / self.dt
+        
+        # Take minimum of all three constraints
+        r_i = min(Q_max_ramp, supply_limited_flow, queue_limited_demand)
+        r_i = max(0.0, r_i)
+        
+        # Apply metering if configured
+        if ramp.meter_rate_veh_per_hour is not None:
+            r_i = min(r_i, ramp.meter_rate_veh_per_hour)
+        
+        return r_i
+
     def _update_ramp_queues(self, step: int) -> Dict[str, float]:
-        """Advance on-ramp queues by arrivals and compute ramp potential."""
-        potentials: Dict[str, float] = {}
+        """Update on-ramp queues and compute ramp flows.
+        
+        N_i(k+1) = N_i(k) + T * (d_i(k) - r_i(k))
+        """
+        ramp_flows: Dict[str, float] = {}
         for ramp in self.on_ramps:
-            arrivals = _get_profile_value(ramp.arrival_rate_profile, step, self.dt)
-            ramp.queue_veh += arrivals * self.dt
-            meter_rate = ramp.meter_rate_veh_per_hour
-            potential = ramp.queue_veh / self.dt
-            if meter_rate is not None:
-                potential = min(potential, meter_rate)
-            potentials[ramp.name] = max(0.0, potential)
-        return potentials
+            # Get arrival demand
+            d_i = _get_profile_value(ramp.arrival_rate_profile, step, self.dt)
+            
+            # Add arrivals to queue
+            ramp.queue_veh += d_i * self.dt
+            
+            # Ramp flow will be computed during merge, just store placeholder
+            ramp_flows[ramp.name] = 0.0
+        return ramp_flows
 
     def _merge_flows(
         self,
@@ -716,69 +839,95 @@ class METANETSimulation:
         speeds: Sequence[float],
         inflows: Sequence[float],
         outflows: Sequence[float],
+        ramp_flows: Sequence[float],
     ) -> Tuple[List[float], List[float]]:
         """Update densities and speeds using METANET dynamics.
 
-        METANET equations:
-        - Density: rho_i[k+1] = rho_i[k] + (T/L_i) * (q_{i-1}[k] - q_i[k] + r_i[k])
-        - Speed: v_i[k+1] = v_i[k] + T * (
-            (V(rho_i) - v_i) / tau
-            - (v_i / L_i) * (v_i - v_{i-1})
-            - (eta / tau) * (rho_{i+1} - rho_i) / (rho_i + kappa)
-          )
+        METANET equations (from specification):
+        - Density: rho_i(k+1) = rho_i(k) + T/(L_i * lambda_i) * (q_{i-1}(k) + r_i(k) - q_i(k) - s_i(k))
+        - Speed: v_i(k+1) = v_i(k) + T/tau * (V_s(rho_i(k)) - v_i(k))
+                          + T/L_i * v_i(k) * (v_{i-1}(k) - v_i(k))
+                          - T*nu/(tau*L_i) * (rho_{i+1}(k) - rho_i(k)) / (rho_i(k) + kappa)
+                          - T*delta/(L_i*lambda_i) * r_i(k) * v_i(k) / (rho_i(k) + kappa)
+        - Flow: q_i(k) = rho_i(k) * v_i(k) * lambda_i
+        - Equilibrium speed: V_s(rho) = v_f * exp(-1/2 * (rho/rho_cr)^2)
         """
         new_densities = []
         new_speeds = []
 
         for idx, cell in enumerate(self.cells):
-            # Update density (conservation of vehicles)
-            inflow = inflows[idx]
-            outflow = outflows[idx]
-            change = (self.dt / cell.length_km) * (
-                inflow / cell.lanes - outflow / cell.lanes
-            )
-            new_rho = densities[idx] + change
-            new_rho = max(0.0, min(new_rho, cell.jam_density_veh_per_km_per_lane))
-
-            # Update speed (METANET speed dynamics)
-            # Use current (not new) density for speed update
-            rho = max(densities[idx], 0.1)  # Avoid division issues at zero density
+            # Current state
+            rho = densities[idx]
             v = speeds[idx]
-
-            # Equilibrium speed term
-            v_eq = self.equilibrium_speed(
-                densities[idx], cell.free_flow_speed_kmh, cell.jam_density_veh_per_km_per_lane, cell.delta
-            )
+            L_i = cell.length_km
+            lambda_i = cell.lanes
+            
+            # Get actual flows (already computed in main loop accounting for constraints)
+            # inflow and outflow are total flows in veh/h (already include lane factor)
+            # To convert to per-lane density change, divide by lambda_i
+            inflow_total = inflows[idx]  # veh/h
+            outflow_total = outflows[idx]  # veh/h
+            r_i = ramp_flows[idx]  # veh/h
+            s_i = 0.0  # Off-ramp flow (not specified, assume 0)
+            
+            # Update density: rho_i(k+1) = rho_i(k) + T/(L_i * lambda_i) * (inflow_total - outflow_total - s_i)
+            # Since inflow_total and outflow_total are total flows (veh/h), and we want per-lane density (veh/km/lane),
+            # we divide by (L_i * lambda_i) to convert from total veh to veh/km/lane
+            d_rho = (self.dt / (L_i * lambda_i)) * (inflow_total - outflow_total - s_i)
+            new_rho = rho + d_rho
+            new_rho = max(0.0, min(new_rho, cell.jam_density_veh_per_km_per_lane))
+            
+            # Prepare for speed update
+            rho_safe = max(rho, 0.1)  # Avoid division by zero
             tau_hours = cell.tau_s / 3600.0  # Convert tau from seconds to hours
-            relaxation_term = (v_eq - v) / tau_hours
-
-            # Convection term (only if there's upstream flow)
-            if idx > 0 and v > 0:
-                v_upstream = speeds[idx - 1]
-                convection_term = -(v / cell.length_km) * (v - v_upstream)
+            
+            # Equilibrium speed: V_s(rho) = v_f * exp(-1/2 * (rho/rho_cr)^2)
+            V_s = self.equilibrium_speed(
+                rho, 
+                cell.free_flow_speed_kmh, 
+                cell.critical_density_veh_per_km_per_lane
+            )
+            
+            # Relaxation term: T/tau * (V_s(rho_i) - v_i)
+            relaxation_term = (1.0 / tau_hours) * (V_s - v)
+            
+            # Convection term: T/L_i * v_i * (v_{i-1} - v_i)
+            if idx > 0:
+                v_i_minus_1 = speeds[idx - 1]
+                convection_term = (v / L_i) * (v_i_minus_1 - v)
             else:
                 convection_term = 0.0
-
-            # Anticipation term
+            
+            # Anticipation/gradient term: -T*nu/(tau*L_i) * (rho_{i+1} - rho_i) / (rho_i + kappa)
             if idx < len(self.cells) - 1:
-                rho_downstream = densities[idx + 1]
-                # nu is in km²/h, convert to proper units
-                nu_hours = cell.nu  # Already in km²/h
-                anticipation_term = -(nu_hours / tau_hours) * (
-                    (rho_downstream - densities[idx]) / (rho + cell.kappa)
+                rho_i_plus_1 = densities[idx + 1]
+                anticipation_term = -(cell.nu / (tau_hours * L_i)) * (
+                    (rho_i_plus_1 - rho) / (rho_safe + cell.kappa)
                 )
             else:
                 anticipation_term = 0.0
-
-            # Speed update with bounds checking
-            dv = self.dt * (relaxation_term + convection_term + anticipation_term)
+            
+            # Ramp coupling term: -T*delta/(L_i*lambda_i) * r_i * v_i / (rho_i + kappa)
+            if r_i > 0:
+                ramp_coupling_term = -(cell.delta / (L_i * lambda_i)) * (
+                    r_i * v / (rho_safe + cell.kappa)
+                )
+            else:
+                ramp_coupling_term = 0.0
+            
+            # Speed update: v_i(k+1) = v_i(k) + T * (all terms)
+            dv = self.dt * (relaxation_term + convection_term + anticipation_term + ramp_coupling_term)
             new_v = v + dv
+            
+            # Bound speed to physical range
             new_v = max(0.0, min(new_v, cell.free_flow_speed_kmh))
             
             # If density is very low, reset speed to equilibrium
             if new_rho < 1.0:
                 new_v = self.equilibrium_speed(
-                    new_rho, cell.free_flow_speed_kmh, cell.jam_density_veh_per_km_per_lane, cell.delta
+                    new_rho, 
+                    cell.free_flow_speed_kmh, 
+                    cell.critical_density_veh_per_km_per_lane
                 )
 
             new_densities.append(new_rho)
@@ -794,11 +943,13 @@ def build_uniform_metanet_mainline(
     lanes: Union[int, Sequence[int]],
     free_flow_speed_kmh: float,
     jam_density_veh_per_km_per_lane: float,
+    critical_density_veh_per_km_per_lane: float = 33.5,
     tau_s: float = 18.0,
     nu: float = 60.0,
     kappa: float = 40.0,
-    delta: float = 1.0,
+    delta: float = 0.0122,
     capacity_veh_per_hour_per_lane: float = 2200.0,
+    max_ramp_flow_veh_per_hour: float = 2000.0,
     initial_density_veh_per_km_per_lane: Union[float, Sequence[float]] = 0.0,
     initial_speed_kmh: Union[float, Sequence[float]] = 0.0,
 ) -> List[METANETCellConfig]:
@@ -820,6 +971,8 @@ def build_uniform_metanet_mainline(
         Free flow speed (km/h) applied to all cells.
     jam_density_veh_per_km_per_lane:
         Per-lane jam density (veh/km/lane) applied to all cells.
+    critical_density_veh_per_km_per_lane:
+        Critical density (veh/km/lane) for equilibrium speed (default: 33.5).
     tau_s:
         Relaxation time in seconds (default: 18.0).
     nu:
@@ -827,7 +980,7 @@ def build_uniform_metanet_mainline(
     kappa:
         Regularization constant in veh/km/lane (default: 40.0).
     delta:
-        Dimensionless exponent for equilibrium speed (default: 1.0).
+        Ramp metering coupling parameter (default: 0.0122).
     capacity_veh_per_hour_per_lane:
         Per-lane capacity (veh/h/lane, default: 2200.0).
     initial_density_veh_per_km_per_lane:
@@ -882,11 +1035,13 @@ def build_uniform_metanet_mainline(
                 lanes=lane_profile[idx],
                 free_flow_speed_kmh=free_flow_speed_kmh,
                 jam_density_veh_per_km_per_lane=jam_density_veh_per_km_per_lane,
+                critical_density_veh_per_km_per_lane=critical_density_veh_per_km_per_lane,
                 tau_s=tau_s,
                 nu=nu,
                 kappa=kappa,
                 delta=delta,
                 capacity_veh_per_hour_per_lane=capacity_veh_per_hour_per_lane,
+                max_ramp_flow_veh_per_hour=max_ramp_flow_veh_per_hour,
                 initial_density_veh_per_km_per_lane=density_profile[idx],
                 initial_speed_kmh=speed_profile[idx],
             )
@@ -948,6 +1103,7 @@ __all__ = [
     "SimulationResult",
     "build_uniform_metanet_mainline",
     "run_basic_metanet_scenario",
+    "exponential_equilibrium_speed",
     "greenshields_speed",
 ]
 
