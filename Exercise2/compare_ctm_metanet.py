@@ -74,7 +74,7 @@ def create_comparable_cells(
         free_flow_speed_kmh=free_flow_speed_kmh,
         jam_density_veh_per_km_per_lane=jam_density,
         tau_s=18.0,
-        eta=60.0,
+        nu=60.0,
         kappa=40.0,
         capacity_veh_per_hour_per_lane=2200.0,
     )
