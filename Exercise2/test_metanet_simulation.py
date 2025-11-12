@@ -21,6 +21,7 @@ from metanet_simulation import (
     build_uniform_metanet_mainline,
     run_basic_metanet_scenario,
     mfd_speed,
+    greenshields_speed,
 )
 
 

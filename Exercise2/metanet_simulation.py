@@ -354,6 +354,10 @@ def greenshields_speed(
     return free_flow_speed_kmh * (1.0 - ratio ** delta)
 
 
+# Alias for backward compatibility and test compatibility
+mfd_speed = greenshields_speed
+
+
 class METANETSimulation:
     """METANET macroscopic traffic flow simulator.
 
@@ -761,12 +765,35 @@ class METANETSimulation:
             for idx in range(len(self.cells)):
                 # Demand from upstream (either boundary or previous cell)
                 if idx == 0:
-                    mainline_flow_in = min(upstream_demand, self._compute_receiving(densities[idx], self.cells[idx]))
+                    # Boundary flow is simply the demand, constrained by receiving
+                    potential_flow = _get_profile_value(self.upstream_profile, step, self.dt)
+                    receiving = self._compute_receiving(densities[idx], self.cells[idx])
+                    mainline_flow_in = min(potential_flow, receiving)
                 else:
                     # Flow from previous cell: q_i = rho_i * v_i * lambda_i
                     # Units: (veh/km/lane) * (km/h) * lanes = veh/h (total flow)
-                    # This correctly accounts for lane count in flow calculation.
-                    mainline_flow_in = densities[idx-1] * speeds[idx-1] * self.cells[idx-1].lanes
+                    # CRITICAL: Must respect both what cell idx-1 can send AND what cell idx can receive
+                    
+                    # What can cell idx-1 send? Limited by current vehicles + inflow
+                    prev_current_vehicles = densities[idx-1] * self.cells[idx-1].length_km * self.cells[idx-1].lanes
+                    prev_inflow_vehicles = inflows[idx-1] * self.dt if idx-1 == 0 or idx-1 in range(len(inflows)) else 0
+                    # Actually, inflows[idx-1] was already set in previous iteration, so we can use it
+                    if inflows[idx-1] > 0:
+                        max_sending = (prev_current_vehicles + inflows[idx-1] * self.dt) / self.dt
+                    else:
+                        max_sending = prev_current_vehicles / self.dt
+                    
+                    # Theoretical flow from previous cell
+                    theoretical_flow = densities[idx-1] * speeds[idx-1] * self.cells[idx-1].lanes
+                    # Constrain by capacity and availability
+                    prev_capacity = self.cells[idx-1].capacity_veh_per_hour_per_lane * self.cells[idx-1].lanes
+                    sending = min(theoretical_flow, prev_capacity, max_sending)
+                    
+                    # What can cell idx receive?
+                    receiving = self._compute_receiving(densities[idx], self.cells[idx])
+                    
+                    # Actual flow is minimum of sending and receiving
+                    mainline_flow_in = min(sending, receiving)
                 
                 ramp_flow = 0.0
                 ramp = self._ramps_by_cell.get(idx)
@@ -789,9 +816,8 @@ class METANETSimulation:
                     ramp_flows_step[ramp.name] = ramp_flow
                     ramp_flows[idx] = ramp_flow
                     
-                    # In pure METANET, flows simply add up (no capacity-based merging)
-                    # But we still need to respect receiving capacity for stability
-                    receiving = self._compute_receiving(densities[idx], self.cells[idx])
+                    # Receiving capacity was already checked above for mainline
+                    # Now check if mainline + ramp exceeds it
                     total_demand = mainline_flow_in + ramp_flow
                     if total_demand > receiving:
                         # Split the available receiving capacity by priority
@@ -827,6 +853,17 @@ class METANETSimulation:
             # Total flow: density * speed * lanes (veh/km/lane * km/h * lanes = veh/h)
             last_flow = densities[last_idx] * speeds[last_idx] * self.cells[last_idx].lanes
             last_flow = min(last_flow, self.cells[last_idx].capacity_veh_per_hour_per_lane * self.cells[last_idx].lanes)
+            
+            # CRITICAL FIX: Constrain outflow to prevent density from going negative
+            # Available vehicles = current vehicles + inflow during timestep
+            # current_vehicles = density * length * lanes
+            # max_outflow = (current_vehicles + inflow * dt) / dt
+            # This ensures we don't try to send out more than we have
+            current_vehicles = densities[last_idx] * self.cells[last_idx].length_km * self.cells[last_idx].lanes
+            inflow_vehicles = inflows[last_idx] * self.dt
+            max_available_flow = (current_vehicles + inflow_vehicles) / self.dt
+            last_flow = min(last_flow, max_available_flow)
+            
             outflow_last = min(last_flow, downstream_supply)
             outflows[last_idx] = outflow_last
 
@@ -1334,6 +1371,7 @@ __all__ = [
     "run_basic_metanet_scenario",
     "exponential_equilibrium_speed",
     "greenshields_speed",
+    "mfd_speed",  # Alias for greenshields_speed
 ]
 
 
