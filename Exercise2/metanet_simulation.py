@@ -774,14 +774,13 @@ class METANETSimulation:
                     # Units: (veh/km/lane) * (km/h) * lanes = veh/h (total flow)
                     # CRITICAL: Must respect both what cell idx-1 can send AND what cell idx can receive
                     
-                    # What can cell idx-1 send? Limited by current vehicles + inflow
+                    # What can cell idx-1 send? Limited by vehicles at START of time step
+                    # IMPORTANT: Do NOT include inflows[idx-1] here as that would allow
+                    # vehicles to enter and exit cell idx-1 in the same time step,
+                    # violating METANET/CTM temporal discretization where flows are
+                    # computed from state at time t, then used to update to time t+1.
                     prev_current_vehicles = densities[idx-1] * self.cells[idx-1].length_km * self.cells[idx-1].lanes
-                    prev_inflow_vehicles = inflows[idx-1] * self.dt if idx-1 == 0 or idx-1 in range(len(inflows)) else 0
-                    # Actually, inflows[idx-1] was already set in previous iteration, so we can use it
-                    if inflows[idx-1] > 0:
-                        max_sending = (prev_current_vehicles + inflows[idx-1] * self.dt) / self.dt
-                    else:
-                        max_sending = prev_current_vehicles / self.dt
+                    max_sending = prev_current_vehicles / self.dt
                     
                     # Theoretical flow from previous cell
                     theoretical_flow = densities[idx-1] * speeds[idx-1] * self.cells[idx-1].lanes
@@ -854,14 +853,13 @@ class METANETSimulation:
             last_flow = densities[last_idx] * speeds[last_idx] * self.cells[last_idx].lanes
             last_flow = min(last_flow, self.cells[last_idx].capacity_veh_per_hour_per_lane * self.cells[last_idx].lanes)
             
-            # CRITICAL FIX: Constrain outflow to prevent density from going negative
-            # Available vehicles = current vehicles + inflow during timestep
-            # current_vehicles = density * length * lanes
-            # max_outflow = (current_vehicles + inflow * dt) / dt
-            # This ensures we don't try to send out more than we have
+            # CRITICAL FIX: Constrain outflow to vehicles available at START of time step
+            # IMPORTANT: Do NOT include inflow_vehicles here as that would allow
+            # vehicles to enter and exit the last cell in the same time step,
+            # violating METANET/CTM temporal discretization where flows are
+            # computed from state at time t, then used to update to time t+1.
             current_vehicles = densities[last_idx] * self.cells[last_idx].length_km * self.cells[last_idx].lanes
-            inflow_vehicles = inflows[last_idx] * self.dt
-            max_available_flow = (current_vehicles + inflow_vehicles) / self.dt
+            max_available_flow = current_vehicles / self.dt
             last_flow = min(last_flow, max_available_flow)
             
             outflow_last = min(last_flow, downstream_supply)

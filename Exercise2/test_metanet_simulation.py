@@ -394,6 +394,151 @@ class TestMETANETSimulation(unittest.TestCase):
         # Within small tolerance due to numerical precision
         self.assertAlmostEqual(initial_vehicles, final_vehicles, delta=1.0)
 
+    def test_no_same_step_exit_of_entering_vehicles(self):
+        """Test that vehicles entering a cell cannot exit in the same time step.
+        
+        This test verifies the temporal discretization: flows should be computed
+        from the state at the BEGINNING of each time step. Vehicles that enter
+        during step t should not be available to exit until step t+1.
+        
+        The test creates a scenario where we can observe whether same-step 
+        inflow is being counted toward sending capacity.
+        """
+        # Create a 2-cell chain with the first cell initially having some vehicles
+        cells = build_uniform_metanet_mainline(
+            num_cells=2,
+            cell_length_km=1.0,
+            lanes=2,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=150.0,
+            initial_density_veh_per_km_per_lane=[10.0, 10.0],
+        )
+        
+        # Apply constant upstream demand
+        upstream_demand = 2000.0  # veh/h
+        
+        sim = METANETSimulation(
+            cells=cells,
+            time_step_hours=0.01,  # Small time step
+            upstream_demand_profile=upstream_demand,
+            downstream_supply_profile=10000.0,  # Ample downstream capacity
+        )
+        
+        result = sim.run(steps=5)
+        dt = 0.01
+        
+        # Verify conservation at each step
+        # Without the bug, vehicles are conserved: 
+        # total(t+1) = total(t) + inflow - outflow
+        for step in range(len(result.flows["cell_1"])):
+            # Total vehicles at start of step
+            total_start = sum(
+                result.densities[cell.name][step] * cell.length_km * cell.lanes
+                for cell in cells
+            )
+            
+            # Total vehicles at end of step
+            total_end = sum(
+                result.densities[cell.name][step+1] * cell.length_km * cell.lanes
+                for cell in cells
+            )
+            
+            # Net change
+            boundary_inflow_veh = upstream_demand * dt
+            system_outflow_veh = result.flows["cell_1"][step] * dt
+            expected_change = boundary_inflow_veh - system_outflow_veh
+            actual_change = total_end - total_start
+            
+            error = abs(actual_change - expected_change)
+            
+            # Conservation should hold (small numerical tolerance)
+            self.assertLess(error, 0.5,
+                          f"Conservation violated at step {step}: "
+                          f"expected change {expected_change:.2f}, "
+                          f"actual {actual_change:.2f}, "
+                          f"error {error:.2f}")
+        
+        # Additionally verify that outflow from a cell cannot exceed
+        # the vehicles available at the start of the time step
+        for step in range(len(result.flows["cell_0"])):
+            vehicles_at_start = (
+                result.densities["cell_0"][step] * 
+                cells[0].length_km * 
+                cells[0].lanes
+            )
+            outflow_rate = result.flows["cell_0"][step]
+            max_possible_outflow = vehicles_at_start / dt
+            
+            # Outflow should not exceed what was available at start
+            # (allowing small tolerance for numerical precision and capacity constraints)
+            self.assertLessEqual(outflow_rate, max_possible_outflow + 1.0,
+                               f"Step {step}: outflow {outflow_rate:.2f} veh/h exceeds "
+                               f"max possible {max_possible_outflow:.2f} veh/h based on "
+                               f"vehicles at start ({vehicles_at_start:.2f})")
+
+    def test_global_vehicle_conservation(self):
+        """Test that total vehicles in the network are conserved over multiple steps.
+        
+        This test verifies that: 
+        Total_Vehicles(t+1) = Total_Vehicles(t) + Inflow(t) - Outflow(t)
+        
+        Any violation indicates vehicles are being created/destroyed incorrectly.
+        """
+        cells = build_uniform_metanet_mainline(
+            num_cells=3,
+            cell_length_km=0.5,
+            lanes=2,
+            free_flow_speed_kmh=100.0,
+            jam_density_veh_per_km_per_lane=150.0,
+            initial_density_veh_per_km_per_lane=[20.0, 30.0, 25.0],
+        )
+        
+        # Use time-varying demand
+        def varying_demand(step: int) -> float:
+            return 800.0 + 200.0 * (step % 3)
+        
+        sim = METANETSimulation(
+            cells=cells,
+            time_step_hours=0.01,
+            upstream_demand_profile=varying_demand,
+            downstream_supply_profile=5000.0,
+        )
+        
+        result = sim.run(steps=10)
+        dt = result.time_step_hours
+        
+        # Track total vehicles over time
+        for step in range(1, 10):
+            # Calculate total vehicles at step-1 and step
+            total_prev = sum(
+                result.densities[cell.name][step-1] * cell.length_km * cell.lanes
+                for cell in cells
+            )
+            total_curr = sum(
+                result.densities[cell.name][step] * cell.length_km * cell.lanes
+                for cell in cells
+            )
+            
+            # Get upstream inflow and downstream outflow for this step
+            # Inflow is the flow into first cell (from boundary)
+            # Note: flows are recorded as outflows, so we need to be careful
+            # The upstream demand at step-1 is what flows into cell 0
+            upstream_inflow = varying_demand(step-1)
+            
+            # Outflow is the flow out of last cell
+            downstream_outflow = result.flows["cell_2"][step-1]
+            
+            # Conservation equation: 
+            # vehicles(t) = vehicles(t-1) + dt * (inflow - outflow)
+            expected_total = total_prev + dt * (upstream_inflow - downstream_outflow)
+            
+            # Allow small tolerance for numerical precision
+            error = abs(total_curr - expected_total)
+            self.assertLess(error, 1.0,
+                          f"Conservation violated at step {step}: "
+                          f"expected {expected_total:.2f} vehicles, "
+                          f"got {total_curr:.2f} vehicles (error={error:.2f})")
+
     def test_steady_state_preservation(self):
         """Test that a steady-state equilibrium is preserved."""
         # Initialize with equilibrium: rho = 50, v = V(50)
