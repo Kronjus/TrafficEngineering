@@ -263,7 +263,7 @@ class OnRampConfig:
 
 @dataclass
 class SimulationResult:
-    """Container for the simulation time series.
+    r"""Container for the simulation time series.
 
     The simulator stores \*densities\* (veh/km/lane) with an initial value at
     ``t = 0`` followed by the state after each time step.  Flow-like series do
@@ -284,6 +284,9 @@ class SimulationResult:
     # Ramp flows: mapping ramp name -> list of accepted ramp flows (veh/h)
     # aligned with simulation intervals (padded when converting to a DataFrame).
     ramp_flows: Dict[str, List[float]]
+    # Upstream queue: list of queued vehicles (veh) at the upstream boundary,
+    # sampled at the same times as densities (including initial value).
+    upstream_queue: List[float]
     # Time step used by the simulation (hours).
     time_step_hours: float
 
@@ -299,6 +302,7 @@ class SimulationResult:
         # - flows: length == steps - 1 (flows align with intervals)
         # - ramp_queues: length == steps
         # - ramp_flows: length == steps - 1
+        # - upstream_queue: length == steps
         steps = self.steps
         expected_intervals = steps - 1
         
@@ -333,6 +337,13 @@ class SimulationResult:
                     f"Ramp flow series '{name}' has length {len(series)}, "
                     f"expected {expected_intervals} (steps - 1 for interval alignment)."
                 )
+        
+        # Check upstream queue series matches density length
+        if len(self.upstream_queue) != steps:
+            raise ValueError(
+                f"Upstream queue series has length {len(self.upstream_queue)}, "
+                f"expected {steps} (must match density time points)."
+            )
 
     @property
     def duration_hours(self) -> float:
@@ -387,6 +398,8 @@ class SimulationResult:
           flow series is empty it is padded with 0.0.
         - Ramp queues are recorded at the same times as densities and inserted
           without padding.
+        - Upstream queue is recorded at the same times as densities and inserted
+          without padding.
         """
         try:
             import pandas as pd
@@ -418,6 +431,9 @@ class SimulationResult:
         for name, series in self.ramp_flows.items():
             padded = series + [series[-1] if series else 0.0]
             data[("ramp_flow", name)] = padded
+
+        # Upstream queue is recorded with densities (including initial queue).
+        data[("upstream_queue", "boundary")] = self.upstream_queue
 
         # Sort column keys to produce stable column ordering in the DataFrame.
         columns = pd.MultiIndex.from_tuples(sorted(data), names=["kind", "id"])
@@ -703,7 +719,8 @@ class CTMSimulation:
         Returns
         -------
         SimulationResult
-            Container with time series for densities, flows and ramp queues/flows.
+            Container with time series for densities, flows, ramp queues/flows,
+            and upstream queue.
         """
         if steps <= 0:
             raise ValueError("steps must be a positive integer.")
@@ -718,6 +735,10 @@ class CTMSimulation:
             ramp.name: [ramp.queue_veh] for ramp in self.on_ramps
         }
         ramp_flow_history: Dict[str, List[float]] = {ramp.name: [] for ramp in self.on_ramps}
+        
+        # Initialize upstream queue (vehicles waiting to enter the first cell)
+        upstream_queue_veh = 0.0
+        upstream_queue_history: List[float] = [upstream_queue_veh]
 
         # Main time-stepping loop.
         for step in range(steps):
@@ -734,7 +755,9 @@ class CTMSimulation:
             outflows = [0.0] * len(self.cells)
 
             # Evaluate upstream demand and downstream supply for this step.
-            upstream_demand = _get_profile_value(self.upstream_profile, step, self.dt)
+            upstream_demand_raw = _get_profile_value(self.upstream_profile, step, self.dt)
+            upstream_demand_raw = max(0.0, upstream_demand_raw)  # Ensure non-negative
+            
             last_cell = self.cells[-1]
             max_downstream_flow = (
                     last_cell.capacity_veh_per_hour_per_lane * last_cell.lanes
@@ -747,10 +770,21 @@ class CTMSimulation:
             # Constrain downstream supply to [0, last_cell_capacity].
             downstream_supply = max(0.0, min(downstream_supply_raw, max_downstream_flow))
 
+            # Add new arrivals to upstream queue (veh/h * dt_hours -> veh)
+            upstream_queue_veh += upstream_demand_raw * self.dt
+            
             # Compute flows into each cell (including upstream boundary to first cell).
             for idx in range(len(self.cells)):
                 supply = receiving[idx]
-                mainline_demand = upstream_demand if idx == 0 else sending[idx - 1]
+                
+                # For the first cell, mainline demand comes from the upstream queue
+                if idx == 0:
+                    # Convert queue to an hourly rate
+                    queue_potential = upstream_queue_veh / self.dt if self.dt > 0 else 0.0
+                    mainline_demand = queue_potential
+                else:
+                    mainline_demand = sending[idx - 1]
+                
                 ramp_flow = 0.0
 
                 ramp = self._ramps_by_cell.get(idx)
@@ -776,6 +810,9 @@ class CTMSimulation:
                 if idx > 0:
                     # The outflow from the upstream cell equals the accepted mainline flow.
                     outflows[idx - 1] = main_flow
+                else:
+                    # For the first cell, remove accepted flow from upstream queue
+                    upstream_queue_veh = max(0.0, upstream_queue_veh - main_flow * self.dt)
 
             # Handle flow out of the last cell to downstream boundary.
             last_idx = len(self.cells) - 1
@@ -791,6 +828,9 @@ class CTMSimulation:
             for ramp in self.on_ramps:
                 ramp_flow_history[ramp.name].append(ramp_flows_step[ramp.name])
                 ramp_queue_history[ramp.name].append(ramp.queue_veh)
+
+            # Save upstream queue history for this step (after the update)
+            upstream_queue_history.append(upstream_queue_veh)
 
             # Integrate densities using conservation: rho_new = rho + (dt/length) * (inflow - outflow)/lanes
             for idx, cell in enumerate(self.cells):
@@ -810,6 +850,7 @@ class CTMSimulation:
             flows=flow_history,
             ramp_queues=ramp_queue_history,
             ramp_flows=ramp_flow_history,
+            upstream_queue=upstream_queue_history,
             time_step_hours=self.dt,
         )
 
@@ -981,7 +1022,7 @@ def build_uniform_mainline(
     -------
     List[CellConfig]
         A list of configured :class:`CellConfig` instances named `cell_0`,
-        `cell_1`, \..., `cell_{num_cells-1}`.
+        `cell_1`, ..., `cell_{num_cells-1}`.
 
     Raises
     ------

@@ -49,13 +49,6 @@ Parameters:
   - capacity_veh_per_hour_per_lane: veh/h/lane
   - max_ramp_flow_veh_per_hour: veh/h
 
-ALINEA Control:
-  - alinea_gain (K_R): (veh/h) per (veh/km/lane)
-    So: rate_adjustment = K_R * (target_density - measured_density)
-    has units: ((veh/h)/(veh/km/lane)) * (veh/km/lane) = veh/h ✓
-  - alinea_target_density: veh/km/lane
-  - alinea_min_rate, alinea_max_rate: veh/h
-
 CRITICAL NOTES FOR LANE DROPS/INCREASES
 ----------------------------------------
 When the number of lanes changes between cells:

@@ -24,10 +24,11 @@ Comprehensive macroscopic traffic flow simulators with CTM and METANET models.
 - Cell Transmission Model (CTM) - First-order density model
 - METANET - Second-order density and speed model
 - On-ramp merging with queue dynamics
-- ALINEA feedback ramp metering control
+- Upstream queue for spillback handling
 - Ramp metering strategies
 - Time-varying demand profiles
 - Lane drops and capacity bottlenecks
+- VKT/VHT computation and velocity tracking
 - Compatible APIs for model comparison
 
 **Quick Start:**
@@ -37,9 +38,6 @@ python Exercise2/ctm_simulation.py
 
 # Run basic METANET demo
 python Exercise2/metanet_simulation.py
-
-# Run ALINEA ramp metering demo
-python Exercise2/alinea_demo.py
 
 # Run comprehensive examples
 python Exercise2/examples_ctm.py
@@ -160,7 +158,7 @@ result = sim.run(steps=20)
 print(f"Max queue: {max(result.ramp_queues['ramp_2'])} vehicles")
 ```
 
-### ALINEA Ramp Metering Example
+### VKT/VHT and Velocity Example
 
 ```python
 from Exercise2.ctm_simulation import (
@@ -179,14 +177,11 @@ cells = build_uniform_mainline(
     jam_density_veh_per_km_per_lane=160.0,
 )
 
-# On-ramp with ALINEA feedback control
+# On-ramp with fixed metering
 on_ramp = OnRampConfig(
     target_cell=2,
     arrival_rate_profile=800.0,
-    meter_rate_veh_per_hour=600.0,  # Initial rate
-    alinea_enabled=True,             # Enable ALINEA
-    alinea_gain=50.0,                # Control gain
-    alinea_target_density=120.0,     # Target density (veh/km/lane)
+    meter_rate_veh_per_hour=600.0,
 )
 
 sim = CTMSimulation(
@@ -197,7 +192,16 @@ sim = CTMSimulation(
 )
 
 result = sim.run(steps=50)
-print(f"Final metering rate: {on_ramp.meter_rate_veh_per_hour:.0f} veh/h")
+
+# Compute VKT and VHT
+vkt, vht = result.compute_vkt_vht(sim.cells)
+print(f"VKT: {vkt:.1f} veh-km, VHT: {vht:.1f} veh-h")
+
+# Get velocity time series
+velocities = result.compute_velocity_series(sim.cells)
+for cell_name, vel_series in velocities.items():
+    avg_vel = sum(vel_series) / len(vel_series)
+    print(f"{cell_name}: avg velocity = {avg_vel:.1f} km/h")
 ```
 
 ## Testing
@@ -209,13 +213,13 @@ python -m unittest test_ctm_simulation -v
 ```
 
 The test suite includes:
-- 39 comprehensive unit tests (including ALINEA)
+- Comprehensive unit tests
 - Configuration validation
 - Flow conservation checks
 - On-ramp merging behavior
 - Queue dynamics
 - Profile handling
-- ALINEA ramp metering control
+- Upstream queue and spillback handling
 
 ### METANET Simulator Tests
 ```bash
@@ -224,13 +228,13 @@ python -m unittest test_metanet_simulation -v
 ```
 
 The test suite includes:
-- 52 comprehensive unit tests (including ALINEA)
+- Comprehensive unit tests
 - Speed dynamics validation
 - Parameter usage verification
 - Conservation checks
-- ALINEA ramp metering control
+- Upstream queue and spillback handling
 
-All tests pass successfully (91 total).
+All tests pass successfully.
 
 ## Documentation
 
@@ -251,9 +255,11 @@ All tests pass successfully (91 total).
 | METANET Model | - | ✓ |
 | On-ramps | - | ✓ |
 | Ramp Metering | - | ✓ |
-| ALINEA Control | - | ✓ |
+| Upstream Queue | - | ✓ |
+| VKT/VHT Computation | - | ✓ |
+| Velocity Tracking | - | ✓ |
 | Time-varying Demand | - | ✓ |
-| Unit Tests | - | ✓ (91 tests) |
+| Unit Tests | - | ✓ |
 | Examples | ✓ | ✓ |
 | Jupyter Notebook | ✓ | ✓ |
 
@@ -293,9 +299,6 @@ This repository is part of a traffic engineering course. For questions or contri
 - Papageorgiou, M., Blosseville, J. M., & Hadj-Salem, H. (1990). "Modelling and real-time control of traffic flow on the southern part of Boulevard Périphérique in Paris: Part I: Modelling." *Transportation Research Part A*, 24(5), 345-359.
 - Papageorgiou, M., Blosseville, J. M., & Hadj-Salem, H. (1990). "Modelling and real-time control of traffic flow on the southern part of Boulevard Périphérique in Paris: Part II: Coordinated on-ramp metering." *Transportation Research Part A*, 24(5), 361-370.
 
-**ALINEA Ramp Metering:**
-- Papageorgiou, M., Hadj-Salem, H., & Blosseville, J. M. (1991). "ALINEA: A local feedback control law for on-ramp metering." *Transportation Research Record*, 1320, 58-67.
-- Papageorgiou, M., & Kotsialos, A. (2002). "Freeway ramp metering: An overview." *IEEE Transactions on Intelligent Transportation Systems*, 3(4), 271-281.
 
 ### Computer Vision (Exercise 1)
 - Ultralytics YOLOv8: https://docs.ultralytics.com/
