@@ -22,10 +22,10 @@ Comprehensive macroscopic traffic flow simulators with CTM and METANET models.
 
 **Key Features:**
 - Cell Transmission Model (CTM) - First-order density model
-- METANET - Second-order density and speed model
+- METANET - Second-order density and speed model with ALINEA ramp metering
 - On-ramp merging with queue dynamics
 - Upstream queue for spillback handling
-- Ramp metering strategies
+- **ALINEA feedback ramp metering** with integral control and anti-windup
 - Time-varying demand profiles
 - Lane drops and capacity bottlenecks
 - VKT/VHT computation and velocity tracking
@@ -39,6 +39,12 @@ python Exercise2/ctm_simulation.py
 # Run basic METANET demo
 python Exercise2/metanet_simulation.py
 
+# Run ALINEA ramp metering scenarios
+python Exercise2/run_alinea.py
+
+# Verify ALINEA implementation
+python Exercise2/verify_alinea.py
+
 # Run comprehensive examples
 python Exercise2/examples_ctm.py
 python Exercise2/examples_metanet.py
@@ -49,6 +55,13 @@ jupyter notebook Exercise2/ctm_simulation.ipynb
 # Run tests (91 tests total)
 python -m unittest Exercise2.test_ctm_simulation Exercise2.test_metanet_simulation
 ```
+
+**ALINEA Ramp Metering:**
+- Integral feedback control: r[k+1] = r[k] + K_I × (ρ_crit - ρ_measured)
+- Separate integrator state with anti-windup logic
+- Automatic parameter scanning to find optimal K_I
+- Comprehensive verification and comparison tools
+- Output plots saved to Exercise2/outputs/
 
 See [Exercise2/README.md](Exercise2/README.md) for complete documentation.
 
