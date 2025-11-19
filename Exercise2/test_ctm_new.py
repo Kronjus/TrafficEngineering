@@ -17,7 +17,7 @@ def test_conservation():
         n_cells=n_cells,
         cell_length_km=1.0,
         lanes=2,
-        T=0.01,  # Small time step for accuracy
+        T=0.005,  # CFL-compliant: T < L/v_f = 1.0/100 = 0.01
         Q_max=2000.0,
         v_f=100.0,
         rho_crit=30.0,
@@ -79,7 +79,7 @@ def test_steady_state():
         n_cells=n_cells,
         cell_length_km=0.5,
         lanes=3,
-        T=0.05,
+        T=0.004,  # CFL-compliant: T < L/v_f = 0.5/100 = 0.005
         Q_max=2000.0,
         v_f=100.0,
         rho_crit=30.0,
@@ -132,7 +132,7 @@ def test_ramp_queue():
         n_cells=n_cells,
         cell_length_km=0.5,
         lanes=3,
-        T=0.1,  # 6 minutes
+        T=0.004,  # CFL-compliant
         Q_max=2000.0,
         v_f=100.0,
         rho_crit=30.0,
@@ -186,7 +186,7 @@ def test_capacity_constraint():
         n_cells=n_cells,
         cell_length_km=0.5,
         lanes=2,
-        T=0.1,
+        T=0.004,  # CFL-compliant
         Q_max=2000.0,
         v_f=100.0,
         rho_crit=30.0,
@@ -236,7 +236,7 @@ def test_free_flow():
         n_cells=n_cells,
         cell_length_km=0.5,
         lanes=3,
-        T=0.1,
+        T=0.004,  # CFL-compliant
         Q_max=2000.0,
         v_f=100.0,
         rho_crit=30.0,

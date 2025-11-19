@@ -105,6 +105,19 @@ class CTMParameters:
         # Convert to numpy arrays if not already
         self.L = np.asarray(self.L, dtype=float)
         self.lambda_lanes = np.asarray(self.lambda_lanes, dtype=float)
+        
+        # Check CFL condition for numerical stability
+        # CFL condition: T <= min(L_i) / v_f
+        min_cell_length = np.min(self.L)
+        max_stable_dt = min_cell_length / self.v_f
+        if self.T > max_stable_dt:
+            import warnings
+            warnings.warn(
+                f"Time step T={self.T:.4f} h exceeds CFL stability limit of "
+                f"{max_stable_dt:.4f} h (= min(L)/{self.v_f}). "
+                f"This may cause numerical oscillations. Consider reducing T.",
+                UserWarning
+            )
 
 
 @dataclass
@@ -288,19 +301,8 @@ def simulate_ctm(
         d_k = d_arr[k]
         s_k = s_arr[k]
         
-        # Step 1: Compute on-ramp flows r_i(k)
-        r_k = np.zeros(n_ramps)
-        for i in range(n_ramps):
-            cell_idx = ramp_map[i]
-            # Receiving capacity of cell for ramp flow
-            receiving_capacity = Q_i_max[cell_idx] * (params.rho_jam - rho_k[cell_idx]) / (params.rho_jam - params.rho_crit)
-            # Available demand from queue and new arrivals
-            available_demand = d_k[i] + N_k[i] / params.T
-            # r_i(k) = min of three terms
-            r_k[i] = min(Q_ramp_max, receiving_capacity, available_demand)
-            r_k[i] = max(0, r_k[i])  # Ensure non-negative
-        
-        # Step 2: Compute cell flows q_i(k)
+        # Step 1: Compute cell flows q_i(k) - needs to be computed before ramp flows
+        # since they share receiving capacity
         q_k = np.zeros(n_cells)
         for i in range(n_cells):
             # Sending capacity: free-flow term
@@ -311,12 +313,34 @@ def simulate_ctm(
                 # Internal cell: downstream is cell i+1
                 receiving = Q_i_max[i + 1] * (params.rho_jam - rho_k[i + 1]) / (params.rho_jam - params.rho_crit)
             else:
-                # Last cell: assume infinite downstream capacity (free outflow)
-                receiving = Q_i_max[i] * 10  # Large number
+                # Last cell: use its own capacity as downstream receiving
+                # (free outflow boundary condition)
+                receiving = Q_i_max[i]
             
             # q_i(k) = min of capacity, receiving, and sending
             q_k[i] = min(Q_i_max[i], receiving, sending)
             q_k[i] = max(0, q_k[i])  # Ensure non-negative
+        
+        # Step 2: Compute on-ramp flows r_i(k)
+        # The ramp flow must respect the receiving capacity of the target cell
+        # AFTER accounting for the mainline flow into that cell
+        r_k = np.zeros(n_ramps)
+        for i in range(n_ramps):
+            cell_idx = ramp_map[i]
+            # Total receiving capacity of target cell
+            total_receiving = Q_i_max[cell_idx] * (params.rho_jam - rho_k[cell_idx]) / (params.rho_jam - params.rho_crit)
+            # Mainline flow entering this cell
+            if cell_idx == 0:
+                mainline_in = q_up[k]
+            else:
+                mainline_in = q_k[cell_idx - 1]
+            # Available receiving capacity for ramp after mainline
+            available_receiving = max(0, total_receiving - mainline_in)
+            # Available demand from queue and new arrivals
+            available_demand = d_k[i] + N_k[i] / params.T
+            # r_i(k) = min of three terms
+            r_k[i] = min(Q_ramp_max, available_receiving, available_demand)
+            r_k[i] = max(0, r_k[i])  # Ensure non-negative
         
         # Step 3: Compute speeds v_i(k) = q_i(k) / (lambda_i * rho_i(k))
         v_k = np.zeros(n_cells)
@@ -446,18 +470,22 @@ def run_simple_example():
     - Single on-ramp at cell 2 with constant demand
     - Constant upstream demand
     - No off-ramps
+    
+    Note: The time step is chosen to satisfy the CFL stability condition:
+    T <= min(L_i) / v_f for numerical stability.
     """
     # Setup
     n_cells = 5
     n_ramps = 1
-    K = 50  # 50 time steps
+    K = 100  # More steps needed with smaller time step
     
     # Create parameters
+    # CFL condition: T <= L/v_f = 0.5/100 = 0.005 h
     params = create_uniform_parameters(
         n_cells=n_cells,
         cell_length_km=0.5,
         lanes=3,
-        T=0.1,  # 6 minutes
+        T=0.004,  # Satisfies CFL condition
         Q_max=2000.0,
         v_f=100.0,
         rho_crit=30.0,
