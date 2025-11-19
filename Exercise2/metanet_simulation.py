@@ -97,18 +97,11 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 # Reuse the profile types and helper from CTM
-try:
-    from ctm_simulation import (
-        Profile,
-        _get_profile_value,
-        SimulationResult,
-    )
-except ImportError:
-    from .ctm_simulation import (
-        Profile,
-        _get_profile_value,
-        SimulationResult,
-    )
+from ctm_simulation import (
+    Profile,
+    _get_profile_value,
+    SimulationResult,
+)
 
 NumberLike = Union[float, int]
 
@@ -203,23 +196,12 @@ class METANETOnRampConfig:
         Arrival demand profile (veh/h).
     meter_rate_veh_per_hour : Optional[float]
         Optional ramp metering rate (veh/h). If None, the ramp is unmetered.
-        When ALINEA is enabled, this serves as the initial metering rate.
     mainline_priority : float
         Fraction in [0, 1] giving priority share to mainline when merging.
     initial_queue_veh : float
         Initial queued vehicles on the ramp (veh).
     name : Optional[str]
         Optional human-readable identifier for the ramp.
-    alinea_enabled : bool
-        Enable ALINEA ramp metering control (default: False).
-    alinea_gain : float
-        ALINEA controller gain Kr in (veh/h)/(veh/km/lane) (default: 70.0).
-    alinea_target_density : float
-        Target density for ALINEA controller in veh/km/lane (default: 30.0).
-    alinea_min_rate : float
-        Minimum metering rate for ALINEA in veh/h (default: 0.0).
-    alinea_max_rate : float
-        Maximum metering rate for ALINEA in veh/h (default: 2000.0).
     queue_veh : float
         Runtime queue size (veh). Initialized from initial_queue_veh.
     """
@@ -230,13 +212,6 @@ class METANETOnRampConfig:
     mainline_priority: float = 0.5
     initial_queue_veh: float = 0.0
     name: Optional[str] = None
-    
-    # ALINEA ramp metering control
-    alinea_enabled: bool = False
-    alinea_gain: float = 70.0
-    alinea_target_density: float = 30.0
-    alinea_min_rate: float = 0.0
-    alinea_max_rate: float = 2000.0
 
     # Runtime state
     queue_veh: float = field(init=False)
@@ -248,22 +223,6 @@ class METANETOnRampConfig:
             raise ValueError("meter_rate_veh_per_hour cannot be negative.")
         if self.initial_queue_veh < 0:
             raise ValueError("initial_queue_veh cannot be negative.")
-        
-        # ALINEA validation
-        if self.alinea_enabled:
-            if self.alinea_gain <= 0:
-                raise ValueError("alinea_gain must be positive.")
-            if self.alinea_target_density <= 0:
-                raise ValueError("alinea_target_density must be positive.")
-            if self.alinea_min_rate < 0:
-                raise ValueError("alinea_min_rate cannot be negative.")
-            if self.alinea_max_rate <= 0:
-                raise ValueError("alinea_max_rate must be positive.")
-            if self.alinea_min_rate > self.alinea_max_rate:
-                raise ValueError("alinea_min_rate cannot exceed alinea_max_rate.")
-            # If ALINEA is enabled and no initial meter rate, use max rate
-            if self.meter_rate_veh_per_hour is None:
-                self.meter_rate_veh_per_hour = self.alinea_max_rate
         
         self.queue_veh = float(self.initial_queue_veh)
 
@@ -554,16 +513,9 @@ class METANETSimulation:
         ramp_flow_history: Dict[str, List[float]] = {
             ramp.name: [] for ramp in self.on_ramps
         }
-        
-        # Initialize upstream queue (vehicles waiting to enter the first cell)
-        upstream_queue_veh = 0.0
-        upstream_queue_history: List[float] = [upstream_queue_veh]
 
         # Main time-stepping loop
         for step in range(steps):
-            # Apply ALINEA ramp metering control
-            self._apply_alinea_control(densities, step)
-            
             # Update on-ramp queues (add arrivals)
             ramp_flows_placeholder = self._update_ramp_queues(step)
             ramp_flows_step: Dict[str, float] = {
@@ -571,11 +523,9 @@ class METANETSimulation:
             }
 
             # Evaluate upstream demand and downstream supply
-            upstream_demand_raw = _get_profile_value(
+            upstream_demand = _get_profile_value(
                 self.upstream_profile, step, self.dt
             )
-            upstream_demand_raw = max(0.0, upstream_demand_raw)  # Ensure non-negative
-            
             last_cell = self.cells[-1]
             max_downstream_flow = (
                 last_cell.capacity_veh_per_hour_per_lane * last_cell.lanes
@@ -587,9 +537,6 @@ class METANETSimulation:
             )
             downstream_supply = max(0.0, min(downstream_supply_raw, max_downstream_flow))
 
-            # Add new arrivals to upstream queue (veh/h * dt_hours -> veh)
-            upstream_queue_veh += upstream_demand_raw * self.dt
-
             # Prepare inflow/outflow accumulators and store ramp flows
             inflows = [0.0] * len(self.cells)
             outflows = [0.0] * len(self.cells)
@@ -599,11 +546,10 @@ class METANETSimulation:
             for idx in range(len(self.cells)):
                 # Demand from upstream (either boundary or previous cell)
                 if idx == 0:
-                    # For the first cell, mainline demand comes from the upstream queue
-                    # Convert queue to an hourly rate
-                    queue_potential = upstream_queue_veh / self.dt if self.dt > 0 else 0.0
+                    # Boundary flow is simply the demand, constrained by receiving
+                    potential_flow = _get_profile_value(self.upstream_profile, step, self.dt)
                     receiving = self._compute_receiving(densities[idx], self.cells[idx])
-                    mainline_flow_in = min(queue_potential, receiving)
+                    mainline_flow_in = min(potential_flow, receiving)
                 else:
                     # Flow from previous cell: q_i = rho_i * v_i * lambda_i
                     # Units: (veh/km/lane) * (km/h) * lanes = veh/h (total flow)
@@ -681,9 +627,6 @@ class METANETSimulation:
 
                 if idx > 0:
                     outflows[idx - 1] = main_flow
-                else:
-                    # For the first cell, remove accepted flow from upstream queue
-                    upstream_queue_veh = max(0.0, upstream_queue_veh - main_flow * self.dt)
 
             # Handle flow out of the last cell
             last_idx = len(self.cells) - 1
@@ -712,9 +655,6 @@ class METANETSimulation:
                 ramp_flow_history[ramp.name].append(ramp_flows_step[ramp.name])
                 ramp_queue_history[ramp.name].append(ramp.queue_veh)
 
-            # Save upstream queue history for this step (after the update)
-            upstream_queue_history.append(upstream_queue_veh)
-
             # Update densities and speeds using METANET dynamics
             new_densities, new_speeds = self._update_state(
                 densities, speeds, inflows, outflows, ramp_flows
@@ -732,7 +672,6 @@ class METANETSimulation:
             flows=flow_history,
             ramp_queues=ramp_queue_history,
             ramp_flows=ramp_flow_history,
-            upstream_queue=upstream_queue_history,
             time_step_hours=self.dt,
         )
 
@@ -898,54 +837,6 @@ class METANETSimulation:
                 ramp_flow += min(additional_ramp, remaining_ramp_demand)
 
         return main_flow, ramp_flow
-
-    def _apply_alinea_control(self, densities: Sequence[float], step: int) -> None:
-        """Apply ALINEA ramp metering control to update meter rates.
-        
-        ALINEA is a feedback controller that adjusts ramp metering rates based on
-        downstream occupancy (density). The control law is:
-        
-            r(k) = r(k-1) + Kr * (ρ_target - ρ_downstream(k))
-        
-        where:
-            - r(k) is the metering rate at time k (veh/h)
-            - Kr is the controller gain ((veh/h)/(veh/km/lane))
-            - ρ_target is the target density (veh/km/lane)
-            - ρ_downstream(k) is the measured downstream density (veh/km/lane)
-        
-        Parameters
-        ----------
-        densities : Sequence[float]
-            Current per-lane densities for all cells (veh/km/lane).
-        step : int
-            Current simulation step (used for logging/debugging).
-        
-        Notes
-        -----
-        The metering rate is clamped to [alinea_min_rate, alinea_max_rate].
-        If ALINEA is not enabled for a ramp, this method does nothing.
-        """
-        for ramp in self.on_ramps:
-            if not ramp.alinea_enabled:
-                continue
-            
-            # Get downstream density (target cell where ramp merges)
-            target_idx = int(ramp.target_cell)
-            downstream_density = densities[target_idx]
-            
-            # Compute density error (target - actual)
-            density_error = ramp.alinea_target_density - downstream_density
-            
-            # Apply ALINEA control law
-            # Units: (veh/h) + ((veh/h)/(veh/km/lane)) * (veh/km/lane) = veh/h ✓
-            rate_adjustment = ramp.alinea_gain * density_error
-            new_rate = ramp.meter_rate_veh_per_hour + rate_adjustment
-            
-            # Clamp to physical bounds
-            new_rate = max(ramp.alinea_min_rate, min(new_rate, ramp.alinea_max_rate))
-            
-            # Update meter rate
-            ramp.meter_rate_veh_per_hour = new_rate
 
     def _update_state(
         self,

@@ -220,7 +220,6 @@ class OnRampConfig:
         semantics follow `_get_profile_value`.
     meter_rate_veh_per_hour : Optional[float]
         Optional ramp metering rate (veh/h). If ``None`` the ramp is unmetered.
-        When ALINEA is enabled, this serves as the initial metering rate.
     mainline_priority : float
         Fraction in [0, 1] giving the initial priority share to the mainline
         when merging with ramp flow. A value of 0.5 gives equal priority.
@@ -230,16 +229,6 @@ class OnRampConfig:
     name : Optional[str]
         Optional human-readable identifier for the ramp. The simulator may
         assign a default name if omitted.
-    alinea_enabled : bool
-        Enable ALINEA ramp metering control (default: False).
-    alinea_gain : float
-        ALINEA controller gain Kr in (veh/h)/(veh/km/lane) (default: 70.0).
-    alinea_target_density : float
-        Target density for ALINEA controller in veh/km/lane (default: 30.0).
-    alinea_min_rate : float
-        Minimum metering rate for ALINEA in veh/h (default: 0.0).
-    alinea_max_rate : float
-        Maximum metering rate for ALINEA in veh/h (default: 2000.0).
     queue_veh : float
         Runtime queue size (veh). Marked ``init=False`` and initialised in
         ``__post_init__`` from ``initial_queue_veh``.
@@ -251,13 +240,6 @@ class OnRampConfig:
     mainline_priority: float = 0.5
     initial_queue_veh: float = 0.0
     name: Optional[str] = None
-    
-    # ALINEA ramp metering control
-    alinea_enabled: bool = False
-    alinea_gain: float = 70.0
-    alinea_target_density: float = 30.0
-    alinea_min_rate: float = 0.0
-    alinea_max_rate: float = 2000.0
 
     # Runtime state: current queue size in vehicles. Not provided by caller.
     queue_veh: float = field(init=False)
@@ -274,22 +256,6 @@ class OnRampConfig:
         # Initial queue cannot be negative.
         if self.initial_queue_veh < 0:
             raise ValueError("initial_queue_veh cannot be negative.")
-        
-        # ALINEA validation
-        if self.alinea_enabled:
-            if self.alinea_gain <= 0:
-                raise ValueError("alinea_gain must be positive.")
-            if self.alinea_target_density <= 0:
-                raise ValueError("alinea_target_density must be positive.")
-            if self.alinea_min_rate < 0:
-                raise ValueError("alinea_min_rate cannot be negative.")
-            if self.alinea_max_rate <= 0:
-                raise ValueError("alinea_max_rate must be positive.")
-            if self.alinea_min_rate > self.alinea_max_rate:
-                raise ValueError("alinea_min_rate cannot exceed alinea_max_rate.")
-            # If ALINEA is enabled and no initial meter rate, use max rate
-            if self.meter_rate_veh_per_hour is None:
-                self.meter_rate_veh_per_hour = self.alinea_max_rate
 
         # Initialise the runtime queue as a float copy of the configured initial queue.
         self.queue_veh = float(self.initial_queue_veh)
@@ -776,9 +742,6 @@ class CTMSimulation:
 
         # Main time-stepping loop.
         for step in range(steps):
-            # Apply ALINEA ramp metering control
-            self._apply_alinea_control(densities, step)
-            
             # Compute sending/receiving capacities from current densities.
             sending = self._compute_sending(densities)
             receiving = self._compute_receiving(densities)
@@ -993,54 +956,6 @@ class CTMSimulation:
                 ramp_flow += min(additional_ramp, remaining_ramp_demand)
 
         return main_flow, ramp_flow
-
-    def _apply_alinea_control(self, densities: Sequence[float], step: int) -> None:
-        """Apply ALINEA ramp metering control to update meter rates.
-        
-        ALINEA is a feedback controller that adjusts ramp metering rates based on
-        downstream occupancy (density). The control law is:
-        
-            r(k) = r(k-1) + Kr * (ρ_target - ρ_downstream(k))
-        
-        where:
-            - r(k) is the metering rate at time k (veh/h)
-            - Kr is the controller gain ((veh/h)/(veh/km/lane))
-            - ρ_target is the target density (veh/km/lane)
-            - ρ_downstream(k) is the measured downstream density (veh/km/lane)
-        
-        Parameters
-        ----------
-        densities : Sequence[float]
-            Current per-lane densities for all cells (veh/km/lane).
-        step : int
-            Current simulation step (used for logging/debugging).
-        
-        Notes
-        -----
-        The metering rate is clamped to [alinea_min_rate, alinea_max_rate].
-        If ALINEA is not enabled for a ramp, this method does nothing.
-        """
-        for ramp in self.on_ramps:
-            if not ramp.alinea_enabled:
-                continue
-            
-            # Get downstream density (target cell where ramp merges)
-            target_idx = int(ramp.target_cell)
-            downstream_density = densities[target_idx]
-            
-            # Compute density error (target - actual)
-            density_error = ramp.alinea_target_density - downstream_density
-            
-            # Apply ALINEA control law
-            # Units: (veh/h) + ((veh/h)/(veh/km/lane)) * (veh/km/lane) = veh/h ✓
-            rate_adjustment = ramp.alinea_gain * density_error
-            new_rate = ramp.meter_rate_veh_per_hour + rate_adjustment
-            
-            # Clamp to physical bounds
-            new_rate = max(ramp.alinea_min_rate, min(new_rate, ramp.alinea_max_rate))
-            
-            # Update meter rate
-            ramp.meter_rate_veh_per_hour = new_rate
 
     def _update_density(
             self,
