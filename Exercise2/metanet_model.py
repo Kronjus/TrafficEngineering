@@ -46,6 +46,7 @@ def run_metanet(
     d_ramp_peak,
     lanes,
     K_I=0.0,
+    K_P=0.0,
     measured_cell=None,
     lane_drop_cell=None,
 ):
@@ -101,7 +102,7 @@ def run_metanet(
         q_in = min(arrivals_main, Q_lane * lanes[0], max(0.0, supply_main))
         queue_main = max(0.0, queue_main + T_step * (d_main - q_in))
 
-        # ramp with ALINEA
+        # ramp with ALINEA (now PI)
         arrivals_ramp = d_ramp + queue_ramp / T_step
         supply_ramp = w_back * (rho_max - density[merge_cell]) * lanes[merge_cell]
         q_supply = max(0.0, supply_ramp)
@@ -109,23 +110,26 @@ def run_metanet(
         ramp_lanes = 1.0
         q_ramp_max = Q_lane * ramp_lanes
 
-        if K_I > 0.0 and measured_cell is not None:
+        if (K_I > 0.0 or K_P > 0.0) and measured_cell is not None:
             rho_meas = density[measured_cell]
-            # ALINEA integrator update using separate command state
-            r_cmd = r_prev_cmd + K_I * (rho_crit - rho_meas)
+            error = rho_crit - rho_meas
+            # PI action: integrator plus proportional correction
+            r_cmd = r_prev_cmd + K_I * error + K_P * error
             r_cmd = max(0.0, r_cmd)
         else:
             r_cmd = arrivals_ramp
 
         # Apply actuator/supply bounds
         q_ramp = min(r_cmd, arrivals_ramp, q_ramp_max, q_supply)
-        
+
         # Anti-windup: update integrator state only when command is not saturated
-        if K_I > 0.0 and measured_cell is not None:
+        if (K_I > 0.0 or K_P > 0.0) and measured_cell is not None:
+            # update integrator state only when not saturated (prevent windup)
             if abs(q_ramp - r_cmd) < 1e-9:
+                # only the integrator part is stateful; storing full command keeps consistency
                 r_prev_cmd = r_cmd
             # else: keep r_prev_cmd unchanged (anti-windup)
-        
+
         queue_ramp = max(0.0, queue_ramp + T_step * (d_ramp - q_ramp))
 
         # current density
