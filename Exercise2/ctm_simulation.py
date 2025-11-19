@@ -220,7 +220,6 @@ class OnRampConfig:
         semantics follow `_get_profile_value`.
     meter_rate_veh_per_hour : Optional[float]
         Optional ramp metering rate (veh/h). If ``None`` the ramp is unmetered.
-        If ALINEA is enabled, this serves as the initial metering rate.
     mainline_priority : float
         Fraction in [0, 1] giving the initial priority share to the mainline
         when merging with ramp flow. A value of 0.5 gives equal priority.
@@ -230,19 +229,6 @@ class OnRampConfig:
     name : Optional[str]
         Optional human-readable identifier for the ramp. The simulator may
         assign a default name if omitted.
-    alinea_enabled : bool
-        If True, enables ALINEA feedback ramp metering control. Requires
-        meter_rate_veh_per_hour as initial rate. Default: False.
-    alinea_gain : float
-        ALINEA regulator gain K_R (veh/h per veh/km/lane). Higher values lead
-        to more aggressive control. Typical range: 40-70. Default: 50.0.
-    alinea_target_density : Optional[float]
-        Target density (veh/km/lane) for ALINEA control. If None, uses 80% of
-        jam density of the target cell. Default: None.
-    alinea_min_rate : float
-        Minimum metering rate (veh/h) for ALINEA control. Default: 240.0.
-    alinea_max_rate : float
-        Maximum metering rate (veh/h) for ALINEA control. Default: 2400.0.
     queue_veh : float
         Runtime queue size (veh). Marked ``init=False`` and initialised in
         ``__post_init__`` from ``initial_queue_veh``.
@@ -254,11 +240,6 @@ class OnRampConfig:
     mainline_priority: float = 0.5
     initial_queue_veh: float = 0.0
     name: Optional[str] = None
-    alinea_enabled: bool = False
-    alinea_gain: float = 50.0
-    alinea_target_density: Optional[float] = None
-    alinea_min_rate: float = 240.0
-    alinea_max_rate: float = 2400.0
 
     # Runtime state: current queue size in vehicles. Not provided by caller.
     queue_veh: float = field(init=False)
@@ -275,25 +256,6 @@ class OnRampConfig:
         # Initial queue cannot be negative.
         if self.initial_queue_veh < 0:
             raise ValueError("initial_queue_veh cannot be negative.")
-
-        # ALINEA validation
-        if self.alinea_enabled:
-            if self.meter_rate_veh_per_hour is None:
-                raise ValueError(
-                    "ALINEA requires an initial meter_rate_veh_per_hour."
-                )
-            if self.alinea_gain <= 0:
-                raise ValueError("alinea_gain must be positive.")
-            if self.alinea_min_rate < 0:
-                raise ValueError("alinea_min_rate cannot be negative.")
-            if self.alinea_max_rate <= 0:
-                raise ValueError("alinea_max_rate must be positive.")
-            if self.alinea_min_rate > self.alinea_max_rate:
-                raise ValueError(
-                    "alinea_min_rate must not exceed alinea_max_rate."
-                )
-            if self.alinea_target_density is not None and self.alinea_target_density <= 0:
-                raise ValueError("alinea_target_density must be positive.")
 
         # Initialise the runtime queue as a float copy of the configured initial queue.
         self.queue_veh = float(self.initial_queue_veh)
@@ -331,6 +293,46 @@ class SimulationResult:
             raise ValueError("time_step_hours must be positive.")
         if not self.densities:
             raise ValueError("densities cannot be empty.")
+        
+        # Validate time-series consistency:
+        # - densities: length == steps (include initial sample at t=0)
+        # - flows: length == steps - 1 (flows align with intervals)
+        # - ramp_queues: length == steps
+        # - ramp_flows: length == steps - 1
+        steps = self.steps
+        expected_intervals = steps - 1
+        
+        # Check all density series have the same length
+        for name, series in self.densities.items():
+            if len(series) != steps:
+                raise ValueError(
+                    f"Density series '{name}' has length {len(series)}, "
+                    f"expected {steps} (must match first series)."
+                )
+        
+        # Check all flow series align with intervals
+        for name, series in self.flows.items():
+            if len(series) != expected_intervals:
+                raise ValueError(
+                    f"Flow series '{name}' has length {len(series)}, "
+                    f"expected {expected_intervals} (steps - 1 for interval alignment)."
+                )
+        
+        # Check all ramp queue series match density length
+        for name, series in self.ramp_queues.items():
+            if len(series) != steps:
+                raise ValueError(
+                    f"Ramp queue series '{name}' has length {len(series)}, "
+                    f"expected {steps} (must match density time points)."
+                )
+        
+        # Check all ramp flow series align with intervals
+        for name, series in self.ramp_flows.items():
+            if len(series) != expected_intervals:
+                raise ValueError(
+                    f"Ramp flow series '{name}' has length {len(series)}, "
+                    f"expected {expected_intervals} (steps - 1 for interval alignment)."
+                )
 
     @property
     def duration_hours(self) -> float:
@@ -421,6 +423,156 @@ class SimulationResult:
         columns = pd.MultiIndex.from_tuples(sorted(data), names=["kind", "id"])
         return pd.DataFrame(data, index=time, columns=columns)
 
+    def compute_vkt_vht(self, cells: Sequence[CellConfig]) -> Tuple[float, float]:
+        """Compute Vehicle Kilometers Traveled (VKT) and Vehicle Hours Traveled (VHT).
+        
+        VKT measures total distance traveled by all vehicles:
+            VKT = sum over all cells and intervals of (flow * dt * cell_length)
+        
+        VHT measures total time spent by all vehicles:
+            VHT = sum over all cells and intervals of (avg_vehicles_in_cell * dt)
+            where avg_vehicles_in_cell = 0.5 * (rho_t + rho_{t+1}) * lanes * length
+        
+        Parameters
+        ----------
+        cells : Sequence[CellConfig]
+            Cell configurations containing geometry (length, lanes) and names.
+        
+        Returns
+        -------
+        vkt : float
+            Total vehicle kilometers traveled.
+        vht : float
+            Total vehicle hours traveled.
+        
+        Notes
+        -----
+        - Flows are in veh/h, time_step_hours is in hours, cell_length_km is in km.
+        - Densities are per-lane (veh/km/lane), so multiply by lanes for total density.
+        - The trapezoidal rule is used for VHT: average of density at t and t+1.
+        """
+        dt = self.time_step_hours
+        intervals = self.steps - 1
+        
+        # Create a mapping from cell name to cell config for quick lookup
+        cell_map = {cell.name: cell for cell in cells}
+        
+        total_vkt = 0.0
+        total_vht = 0.0
+        
+        # Compute VKT from flows
+        for name, flow_series in self.flows.items():
+            cell = cell_map.get(name)
+            if cell is None:
+                continue  # Skip flows not associated with a mainline cell
+            
+            for i in range(intervals):
+                # Get flow for this interval (already validated to have correct length)
+                f = float(flow_series[i])
+                # VKT for this cell-interval: flow (veh/h) * dt (h) * length (km)
+                total_vkt += f * dt * cell.length_km
+        
+        # Compute VHT from densities
+        for name, rho_series in self.densities.items():
+            cell = cell_map.get(name)
+            if cell is None:
+                continue  # Skip densities not associated with a mainline cell
+            
+            for i in range(intervals):
+                # Get densities at start and end of interval
+                rho_t = float(rho_series[i])
+                rho_tp1 = float(rho_series[i + 1])
+                
+                # Average per-lane density over the interval
+                avg_rho_per_lane = 0.5 * (rho_t + rho_tp1)
+                
+                # Total vehicles in cell (average over interval)
+                # = avg_density (veh/km/lane) * lanes * length (km)
+                vehicles_in_cell = avg_rho_per_lane * cell.lanes * cell.length_km
+                
+                # VHT for this cell-interval: vehicles * dt (h)
+                total_vht += vehicles_in_cell * dt
+        
+        return total_vkt, total_vht
+    
+    def compute_velocity_series(
+        self, cells: Sequence[CellConfig]
+    ) -> Dict[str, List[float]]:
+        """Compute velocity time series for each mainline cell.
+        
+        For each cell and each interval, computes velocity as:
+            v = flow / avg_density_total
+        where:
+            - flow is in veh/h (from flows series)
+            - avg_density_total = 0.5 * (rho_t + rho_{t+1}) * lanes (veh/km total)
+            - resulting velocity is in km/h
+        
+        Parameters
+        ----------
+        cells : Sequence[CellConfig]
+            Cell configurations containing geometry (lanes) and names.
+        
+        Returns
+        -------
+        velocities : Dict[str, List[float]]
+            Mapping from cell name to velocity series (km/h).
+            Each series has length == steps - 1 (aligned with intervals/flows).
+            When avg_density_total == 0, velocity is set to 0.0.
+        
+        Notes
+        -----
+        - Velocity is computed for each interval using the average density.
+        - When density is zero (empty cell), velocity is set to 0.0 to avoid
+          division by zero. This is physically reasonable: no vehicles means
+          no meaningful velocity measurement.
+        """
+        intervals = self.steps - 1
+        cell_map = {cell.name: cell for cell in cells}
+        
+        velocities: Dict[str, List[float]] = {}
+        
+        for name in self.flows.keys():
+            cell = cell_map.get(name)
+            if cell is None:
+                continue  # Skip flows not associated with a mainline cell
+            
+            flow_series = self.flows[name]
+            rho_series = self.densities.get(name)
+            
+            if rho_series is None:
+                # No density data for this cell; can't compute velocity
+                continue
+            
+            velocity_series: List[float] = []
+            
+            for i in range(intervals):
+                # Get flow for this interval
+                flow = float(flow_series[i])
+                
+                # Get densities at start and end of interval
+                rho_t = float(rho_series[i])
+                rho_tp1 = float(rho_series[i + 1])
+                
+                # Average per-lane density
+                avg_rho_per_lane = 0.5 * (rho_t + rho_tp1)
+                
+                # Total average density (veh/km total across all lanes)
+                avg_rho_total = avg_rho_per_lane * cell.lanes
+                
+                # Compute velocity: flow (veh/h) / density (veh/km) = km/h
+                if avg_rho_total > 0:
+                    velocity = flow / avg_rho_total
+                else:
+                    # No vehicles in cell; set velocity to 0
+                    velocity = 0.0
+                
+                velocity_series.append(velocity)
+            
+            velocities[name] = velocity_series
+        
+        return velocities
+
+
 
 class CTMSimulation:
     """Cell Transmission Model simulator supporting on-ramps.
@@ -507,13 +659,6 @@ class CTMSimulation:
                     "Only one on-ramp per target cell is supported by this simulator."
                 )
             self._ramps_by_cell[target_index] = ramp
-            
-            # Set default ALINEA target density if not specified
-            if ramp.alinea_enabled and ramp.alinea_target_density is None:
-                target_cell_config = self.cells[target_index]
-                # Use 80% of jam density as default target
-                default_target = 0.8 * target_cell_config.jam_density_veh_per_km_per_lane
-                object.__setattr__(ramp, "alinea_target_density", default_target)
 
     def _resolve_target_index(self, target: Union[int, str]) -> int:
         """Resolve an on-ramp target (index or cell name) to an integer index.
@@ -542,41 +687,6 @@ class CTMSimulation:
         if target not in self._cell_index:
             raise KeyError(f"Unknown cell name '{target}'.")
         return self._cell_index[target]
-
-    def _apply_alinea_control(self, densities: Sequence[float]) -> None:
-        """Apply ALINEA feedback control to update ramp metering rates.
-        
-        ALINEA algorithm: r(k+1) = r(k) + K_R * (ρ_target - ρ_measured)
-        
-        The measured density is taken from the target cell where the ramp merges.
-        
-        Parameters
-        ----------
-        densities : Sequence[float]
-            Current densities (veh/km/lane) for all mainline cells.
-        """
-        for ramp in self.on_ramps:
-            if not ramp.alinea_enabled:
-                continue
-                
-            target_idx = int(ramp.target_cell)
-            measured_density = densities[target_idx]
-            target_density = ramp.alinea_target_density
-            
-            # ALINEA control law: adjust rate based on density error
-            # K_R is in (veh/h) per (veh/km/lane), so units work out to veh/h
-            density_error = target_density - measured_density
-            rate_adjustment = ramp.alinea_gain * density_error
-            
-            # Update metering rate
-            current_rate = ramp.meter_rate_veh_per_hour or 0.0
-            new_rate = current_rate + rate_adjustment
-            
-            # Clamp to min/max bounds
-            new_rate = max(ramp.alinea_min_rate, min(new_rate, ramp.alinea_max_rate))
-            
-            # Update the ramp's metering rate
-            object.__setattr__(ramp, "meter_rate_veh_per_hour", new_rate)
 
     def run(self, steps: int) -> SimulationResult:
         """Run the CTM simulation for the requested number of time steps.
@@ -611,9 +721,6 @@ class CTMSimulation:
 
         # Main time-stepping loop.
         for step in range(steps):
-            # Apply ALINEA feedback control if enabled
-            self._apply_alinea_control(densities)
-            
             # Compute sending/receiving capacities from current densities.
             sending = self._compute_sending(densities)
             receiving = self._compute_receiving(densities)
