@@ -1,6 +1,9 @@
-import numpy as np
+import concurrent.futures
+import os
+
 import matplotlib.pyplot as plt
-from matplotlib import cm
+import numpy as np
+
 from metanet_model import run_metanet
 
 
@@ -22,12 +25,13 @@ def plot_scenario(res, lanes, title_suffix=""):
     m = re.search(r"SCENARIO\s*([A-Z])", title_up)
     scenario_letter = m.group(1) if m else (
         res.get("scenario", "unknown") if isinstance(res.get("scenario"), str) else "unknown")
-    
+
     # Detect ALINEA/K_I while handling negations like "no alinea", "without alinea", etc.
     has_alinea = bool(re.search(r"\balinea\b|\bk_i\b", title_low))
-    negated = bool(re.search(r"\b(no|not|without)\b\s*(alinea|\bk_i\b)|\b(alinea|\bk_i\b)\s*(no|not|without)\b", title_low))
+    negated = bool(
+        re.search(r"\b(no|not|without)\b\s*(alinea|\bk_i\b)|\b(alinea|\bk_i\b)\s*(no|not|without)\b", title_low))
     mode = "alinea" if has_alinea and not negated else ""
-    
+
     # Build base name and collapse multiple underscores
     if mode:
         base_name = f"scenario_{scenario_letter.lower()}_{mode}_metanet"
@@ -113,17 +117,90 @@ def plot_scenario(res, lanes, title_suffix=""):
     plt.show()
 
 
-def scan_K(d_main, d_ramp, lanes, measured_cell, K_min=0.5, K_max=20.0, n_K=1000):
-    K_values = np.linspace(K_min, K_max, n_K)
-    vht_values = np.zeros_like(K_values)
-    avg_speed_values = np.zeros_like(K_values)
+def _run_single(args):
+    i, j, Ki, Kp, d_main, d_ramp, lanes, measured_cell = args
+    res = run_metanet(d_main, d_ramp, lanes, K_I=Ki, K_P=Kp, measured_cell=measured_cell)
+    return i, j, res["vht"], res["avg_speed"]
 
-    for idx, K_I in enumerate(K_values):
-        res = run_metanet(d_main, d_ramp, lanes, K_I=K_I, measured_cell=measured_cell)
-        vht_values[idx] = res["vht"]
-        avg_speed_values[idx] = res["avg_speed"]
 
-    return K_values, vht_values, avg_speed_values
+def scan_K(
+        d_main, d_ramp, lanes, measured_cell,
+        Ki_min=0.0, Ki_max=20.0, n_Ki=50,
+        Kp_min=0.0, Kp_max=10.0, n_Kp=25,
+        n_jobs=None,
+        coarse_refine=False,
+        coarse_factor=5,
+        refine_frac=0.2
+):
+    """
+    Efficient scan over K_I (rows) and K_P (cols).
+    - Uses parallel execution (n_jobs default = number of CPUs).
+    - If coarse_refine=True, does a coarse scan first (grid reduced by coarse_factor),
+      then refines around the best coarse cell using refine_frac window.
+    Returns:
+      Ki_values, Kp_values, vht_grid, avg_speed_grid, best
+    """
+    n_jobs = n_jobs or os.cpu_count() or 1
+
+    def _parallel_scan(Ki_values, Kp_values):
+        vht_grid = np.full((len(Ki_values), len(Kp_values)), np.nan)
+        avg_speed_grid = np.full((len(Ki_values), len(Kp_values)), np.nan)
+
+        tasks = []
+        for i, Ki in enumerate(Ki_values):
+            for j, Kp in enumerate(Kp_values):
+                tasks.append((i, j, Ki, Kp, d_main, d_ramp, lanes, measured_cell))
+
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_jobs) as ex:
+            for i, j, vht, avg in ex.map(_run_single, tasks):
+                vht_grid[i, j] = vht
+                avg_speed_grid[i, j] = avg
+
+        return vht_grid, avg_speed_grid
+
+    Ki_values = np.linspace(Ki_min, Ki_max, n_Ki)
+    Kp_values = np.linspace(Kp_min, Kp_max, n_Kp)
+
+    if not coarse_refine:
+        vht_grid, avg_speed_grid = _parallel_scan(Ki_values, Kp_values)
+    else:
+        # coarse scan
+        ncKi = max(2, n_Ki // coarse_factor)
+        ncKp = max(2, n_Kp // coarse_factor)
+        Ki_coarse = np.linspace(Ki_min, Ki_max, ncKi)
+        Kp_coarse = np.linspace(Kp_min, Kp_max, ncKp)
+        vht_coarse, avg_coarse = _parallel_scan(Ki_coarse, Kp_coarse)
+
+        idx_flat = np.nanargmin(vht_coarse)
+        i_c, j_c = np.unravel_index(idx_flat, vht_coarse.shape)
+        Ki_best_c = Ki_coarse[i_c]
+        Kp_best_c = Kp_coarse[j_c]
+
+        # refine window around coarse best
+        Ki_span = max((Ki_max - Ki_min) * refine_frac, (Ki_coarse[1] - Ki_coarse[0]))
+        Kp_span = max((Kp_max - Kp_min) * refine_frac, (Kp_coarse[1] - Kp_coarse[0]))
+
+        Ki_lo = max(Ki_min, Ki_best_c - Ki_span)
+        Ki_hi = min(Ki_max, Ki_best_c + Ki_span)
+        Kp_lo = max(Kp_min, Kp_best_c - Kp_span)
+        Kp_hi = min(Kp_max, Kp_best_c + Kp_span)
+
+        Ki_values = np.linspace(Ki_lo, Ki_hi, n_Ki)
+        Kp_values = np.linspace(Kp_lo, Kp_hi, n_Kp)
+        vht_grid, avg_speed_grid = _parallel_scan(Ki_values, Kp_values)
+
+    idx_flat = np.nanargmin(vht_grid)
+    i_best, j_best = np.unravel_index(idx_flat, vht_grid.shape)
+    best = {
+        "Ki": Ki_values[i_best],
+        "Kp": Kp_values[j_best],
+        "vht": vht_grid[i_best, j_best],
+        "avg_speed": avg_speed_grid[i_best, j_best],
+        "i_idx": i_best,
+        "j_idx": j_best,
+    }
+
+    return Ki_values, Kp_values, vht_grid, avg_speed_grid, best
 
 
 if __name__ == "__main__":
@@ -157,42 +234,76 @@ if __name__ == "__main__":
     plot_scenario(res_B, lanes_B, title_suffix="– Scenario B, no ALINEA")
     plot_scenario(res_C, lanes_C, title_suffix="– Scenario C, no ALINEA")
 
-    K_B, vht_B, avg_B = scan_K(dB_main, dB_ramp, lanes_B, measured_cell=2)
-    idx_B = np.argmin(vht_B)
+    Ki_vals, Kp_vals, vht_grid, avg_grid, best = scan_K(dB_main, dB_ramp, lanes_B, measured_cell=4)
+
+    # If scan was effectively 1D (single K_P), take that column; otherwise take the column at best K_P
+    if len(Kp_vals) == 1:
+        K_B = Ki_vals
+        vht_B = vht_grid[:, 0]
+        avg_B = avg_grid[:, 0]
+        j_best = 0
+    else:
+        j_best = best["j_idx"]
+        K_B = Ki_vals
+        vht_B = vht_grid[:, j_best]
+        avg_B = avg_grid[:, j_best]
+
+    # pick optimal K_I from the 1D slice
+    idx_B = int(np.nanargmin(vht_B))
     K_opt_B = K_B[idx_B]
     print(f"Scenario B: K_opt = {K_opt_B:.2f}, VHT_min = {vht_B[idx_B]:.1f} veh·h")
 
     plt.figure(figsize=(7, 4))
-    plt.plot(K_B, vht_B)
+    plt.plot(K_B, vht_B, marker='o')
     plt.xlabel("K_I")
     plt.ylabel("VHT [veh·h]")
     plt.title("Scenario B: VHT vs K_I")
     plt.grid(True)
     plt.show()
 
-    best_B = run_metanet(dB_main, dB_ramp, lanes_B, K_I=K_opt_B, measured_cell=2, lane_drop_cell=None)
+    # choose K_P to use in the final simulation (use the K_P from the best column or 0 if only one)
+    Kp_for_sim = float(Kp_vals[j_best]) if len(Kp_vals) >= 1 else 0.0
+    best_B = run_metanet(dB_main, dB_ramp, lanes_B, K_I=K_opt_B, K_P=Kp_for_sim, measured_cell=4, lane_drop_cell=None)
     print("Scenario B with ALINEA (K_opt)")
     print(f"  VKT = {best_B['vkt']:.1f} veh·km")
     print(f"  VHT = {best_B['vht']:.1f} veh·h")
     print(f"  Avg speed = {best_B['avg_speed']:.1f} km/h")
-    plot_scenario(best_B, lanes_B, title_suffix=f"– Scenario B, K_I = {K_opt_B:.2f}")
+    plot_scenario(best_B, lanes_B, title_suffix=f"– Scenario B, K_I = {K_opt_B:.2f}, K_P = {Kp_for_sim:.2f}")
 
-    K_C, vht_C, avg_C = scan_K(dC_main, dC_ramp, lanes_C, measured_cell=4)
-    idx_C = np.argmin(vht_C)
-    K_opt_C = K_C[idx_C]
-    print(f"Scenario C: K_opt = {K_opt_C:.2f}, VHT_min = {vht_C[idx_C]:.1f} veh·h")
+    # perform 2D scan (Ki x Kp)
+    Ki_vals, Kp_vals, vht_grid, avg_grid, best = scan_K(dC_main, dC_ramp, lanes_C, measured_cell=5)
 
+    # print best pair found
+    print(f"Scenario C: K_I_opt = {best['Ki']:.4f}, K_P_opt = {best['Kp']:.4f}, VHT_min = {best['vht']:.1f} veh·h")
+
+    # If you want a 2D heatmap of VHT over (K_I, K_P)
+    plt.figure(figsize=(7, 5))
+    # imshow expects [rows, cols] = [len(Ki), len(Kp)]
+    extent = [Kp_vals[0], Kp_vals[-1], Ki_vals[-1], Ki_vals[0]]  # flip y for natural orientation
+    plt.imshow(vht_grid, aspect='auto', extent=extent, cmap='viridis')
+    plt.colorbar(label='VHT [veh·h]')
+    plt.xlabel("K_P")
+    plt.ylabel("K_I")
+    plt.title("Scenario C: VHT (K_I vs K_P)")
+    plt.scatter([best['Kp']], [best['Ki']], color='red', marker='x', label='best')
+    plt.legend()
+    plt.grid(False)
+    plt.show()
+
+    # Also plot VHT vs K_I for the best K_P (1D cross-section, similar to previous plot)
+    j_best = best['j_idx']
     plt.figure(figsize=(7, 4))
-    plt.plot(K_C, vht_C)
+    plt.plot(Ki_vals, vht_grid[:, j_best], marker='o')
     plt.xlabel("K_I")
     plt.ylabel("VHT [veh·h]")
-    plt.title("Scenario C: VHT vs K_I")
+    plt.title(f"Scenario C: VHT vs K_I (K_P = {Kp_vals[j_best]:.3f})")
     plt.grid(True)
     plt.show()
 
-    best_C = run_metanet(dC_main, dC_ramp, lanes_C, K_I=K_opt_C, K_P=3, measured_cell=4, lane_drop_cell=3)
-    print("Scenario C with ALINEA (K_opt)")
+    # simulate using best controller pair and plot results
+    best_C = run_metanet(dC_main, dC_ramp, lanes_C, K_I=best['Ki'], K_P=best['Kp'], measured_cell=5, lane_drop_cell=3)
+    print("Scenario C with ALINEA (best K_I, K_P)")
     print(f"  VKT = {best_C['vkt']:.1f} veh·km")
     print(f"  VHT = {best_C['vht']:.1f} veh·h")
     print(f"  Avg speed = {best_C['avg_speed']:.1f} km/h")
-    plot_scenario(best_C, lanes_C, title_suffix=f"– Scenario C, K_I = {K_opt_C:.2f}")
+    plot_scenario(best_C, lanes_C, title_suffix=f"– Scenario C, K_I = {best['Ki']:.2f}, K_P = {best['Kp']:.2f}")
