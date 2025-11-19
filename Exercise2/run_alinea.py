@@ -1,6 +1,9 @@
-import numpy as np
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 import matplotlib.pyplot as plt
-from matplotlib import cm
+import numpy as np
+
 from metanet_model import run_metanet
 
 
@@ -22,12 +25,13 @@ def plot_scenario(res, lanes, title_suffix=""):
     m = re.search(r"SCENARIO\s*([A-Z])", title_up)
     scenario_letter = m.group(1) if m else (
         res.get("scenario", "unknown") if isinstance(res.get("scenario"), str) else "unknown")
-    
+
     # Detect ALINEA/K_I while handling negations like "no alinea", "without alinea", etc.
     has_alinea = bool(re.search(r"\balinea\b|\bk_i\b", title_low))
-    negated = bool(re.search(r"\b(no|not|without)\b\s*(alinea|\bk_i\b)|\b(alinea|\bk_i\b)\s*(no|not|without)\b", title_low))
+    negated = bool(
+        re.search(r"\b(no|not|without)\b\s*(alinea|\bk_i\b)|\b(alinea|\bk_i\b)\s*(no|not|without)\b", title_low))
     mode = "alinea" if has_alinea and not negated else ""
-    
+
     # Build base name and collapse multiple underscores
     if mode:
         base_name = f"scenario_{scenario_letter.lower()}_{mode}_metanet"
@@ -113,15 +117,35 @@ def plot_scenario(res, lanes, title_suffix=""):
     plt.show()
 
 
-def scan_K(d_main, d_ramp, lanes, measured_cell, K_min=0.5, K_max=20.0, n_K=1000):
-    K_values = np.linspace(K_min, K_max, n_K)
-    vht_values = np.zeros_like(K_values)
-    avg_speed_values = np.zeros_like(K_values)
+def _run_for_K(args):
+    d_main, d_ramp, lanes, K_I, measured_cell, lane_drop_cell = args
+    res = run_metanet(d_main, d_ramp, lanes, K_I=K_I, measured_cell=measured_cell, lane_drop_cell=lane_drop_cell)
+    return (K_I, res["vht"], res["avg_speed"])
 
-    for idx, K_I in enumerate(K_values):
-        res = run_metanet(d_main, d_ramp, lanes, K_I=K_I, measured_cell=measured_cell)
-        vht_values[idx] = res["vht"]
-        avg_speed_values[idx] = res["avg_speed"]
+
+def scan_K(d_main, d_ramp, lanes, measured_cell, K_min=0.5, K_max=20.0, n_K=1000, n_workers=None, lane_drop_cell=None):
+    """
+    Parallel scan over K_I values. Returns (K_values, vht_values, avg_speed_values).
+    """
+    K_values = np.linspace(K_min, K_max, n_K)
+
+    if n_workers is None:
+        n_workers = max(1, (os.cpu_count() or 1) - 1)
+
+    args_iter = [(d_main, d_ramp, lanes, K, measured_cell, lane_drop_cell) for K in K_values]
+    vht_values = np.empty_like(K_values)
+    avg_speed_values = np.empty_like(K_values)
+
+    with ProcessPoolExecutor(max_workers=n_workers) as ex:
+        future_to_index = {ex.submit(_run_for_K, arg): idx for idx, arg in enumerate(args_iter)}
+        for fut in as_completed(future_to_index):
+            idx = future_to_index[fut]
+            try:
+                _, vht, avg = fut.result()
+            except Exception:
+                raise
+            vht_values[idx] = vht
+            avg_speed_values[idx] = avg
 
     return K_values, vht_values, avg_speed_values
 
@@ -157,7 +181,7 @@ if __name__ == "__main__":
     plot_scenario(res_B, lanes_B, title_suffix="– Scenario B, no ALINEA")
     plot_scenario(res_C, lanes_C, title_suffix="– Scenario C, no ALINEA")
 
-    K_B, vht_B, avg_B = scan_K(dB_main, dB_ramp, lanes_B, measured_cell=2)
+    K_B, vht_B, avg_B = scan_K(dB_main, dB_ramp, lanes_B, measured_cell=4)
     idx_B = np.argmin(vht_B)
     K_opt_B = K_B[idx_B]
     print(f"Scenario B: K_opt = {K_opt_B:.2f}, VHT_min = {vht_B[idx_B]:.1f} veh·h")
@@ -170,14 +194,15 @@ if __name__ == "__main__":
     plt.grid(True)
     plt.show()
 
-    best_B = run_metanet(dB_main, dB_ramp, lanes_B, K_I=K_opt_B, measured_cell=2, lane_drop_cell=None)
+    best_B = run_metanet(dB_main, dB_ramp, lanes_B, K_I=K_opt_B, measured_cell=4, lane_drop_cell=None)
     print("Scenario B with ALINEA (K_opt)")
     print(f"  VKT = {best_B['vkt']:.1f} veh·km")
     print(f"  VHT = {best_B['vht']:.1f} veh·h")
     print(f"  Avg speed = {best_B['avg_speed']:.1f} km/h")
     plot_scenario(best_B, lanes_B, title_suffix=f"– Scenario B, K_I = {K_opt_B:.2f}")
 
-    K_C, vht_C, avg_C = scan_K(dC_main, dC_ramp, lanes_C, measured_cell=4)
+    K_C, vht_C, avg_C = scan_K(dC_main, dC_ramp, K_min=0.0, K_max=100.0, n_K=10_000, lanes=lanes_C, measured_cell=4,
+                               lane_drop_cell=3)
     idx_C = np.argmin(vht_C)
     K_opt_C = K_C[idx_C]
     print(f"Scenario C: K_opt = {K_opt_C:.2f}, VHT_min = {vht_C[idx_C]:.1f} veh·h")
