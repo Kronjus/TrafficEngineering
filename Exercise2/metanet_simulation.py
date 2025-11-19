@@ -513,6 +513,10 @@ class METANETSimulation:
         ramp_flow_history: Dict[str, List[float]] = {
             ramp.name: [] for ramp in self.on_ramps
         }
+        
+        # Initialize upstream queue (vehicles waiting to enter the first cell)
+        upstream_queue_veh = 0.0
+        upstream_queue_history: List[float] = [upstream_queue_veh]
 
         # Main time-stepping loop
         for step in range(steps):
@@ -523,9 +527,11 @@ class METANETSimulation:
             }
 
             # Evaluate upstream demand and downstream supply
-            upstream_demand = _get_profile_value(
+            upstream_demand_raw = _get_profile_value(
                 self.upstream_profile, step, self.dt
             )
+            upstream_demand_raw = max(0.0, upstream_demand_raw)  # Ensure non-negative
+            
             last_cell = self.cells[-1]
             max_downstream_flow = (
                 last_cell.capacity_veh_per_hour_per_lane * last_cell.lanes
@@ -537,6 +543,9 @@ class METANETSimulation:
             )
             downstream_supply = max(0.0, min(downstream_supply_raw, max_downstream_flow))
 
+            # Add new arrivals to upstream queue (veh/h * dt_hours -> veh)
+            upstream_queue_veh += upstream_demand_raw * self.dt
+
             # Prepare inflow/outflow accumulators and store ramp flows
             inflows = [0.0] * len(self.cells)
             outflows = [0.0] * len(self.cells)
@@ -546,10 +555,11 @@ class METANETSimulation:
             for idx in range(len(self.cells)):
                 # Demand from upstream (either boundary or previous cell)
                 if idx == 0:
-                    # Boundary flow is simply the demand, constrained by receiving
-                    potential_flow = _get_profile_value(self.upstream_profile, step, self.dt)
+                    # For the first cell, mainline demand comes from the upstream queue
+                    # Convert queue to an hourly rate
+                    queue_potential = upstream_queue_veh / self.dt if self.dt > 0 else 0.0
                     receiving = self._compute_receiving(densities[idx], self.cells[idx])
-                    mainline_flow_in = min(potential_flow, receiving)
+                    mainline_flow_in = min(queue_potential, receiving)
                 else:
                     # Flow from previous cell: q_i = rho_i * v_i * lambda_i
                     # Units: (veh/km/lane) * (km/h) * lanes = veh/h (total flow)
@@ -627,6 +637,9 @@ class METANETSimulation:
 
                 if idx > 0:
                     outflows[idx - 1] = main_flow
+                else:
+                    # For the first cell, remove accepted flow from upstream queue
+                    upstream_queue_veh = max(0.0, upstream_queue_veh - main_flow * self.dt)
 
             # Handle flow out of the last cell
             last_idx = len(self.cells) - 1
@@ -655,6 +668,9 @@ class METANETSimulation:
                 ramp_flow_history[ramp.name].append(ramp_flows_step[ramp.name])
                 ramp_queue_history[ramp.name].append(ramp.queue_veh)
 
+            # Save upstream queue history for this step (after the update)
+            upstream_queue_history.append(upstream_queue_veh)
+
             # Update densities and speeds using METANET dynamics
             new_densities, new_speeds = self._update_state(
                 densities, speeds, inflows, outflows, ramp_flows
@@ -672,6 +688,7 @@ class METANETSimulation:
             flows=flow_history,
             ramp_queues=ramp_queue_history,
             ramp_flows=ramp_flow_history,
+            upstream_queue=upstream_queue_history,
             time_step_hours=self.dt,
         )
 
