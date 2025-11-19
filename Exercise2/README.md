@@ -64,6 +64,163 @@ python Exercise2/compare_ctm_metanet.py
 
 This compares both models under identical conditions to understand their differences.
 
+## ALINEA Ramp Metering
+
+### Overview
+
+ALINEA is a feedback control strategy for ramp metering that regulates on-ramp flow to maintain optimal density on the mainline freeway. The implementation in `metanet_model.py` includes:
+
+- **Integral feedback control**: r[k+1] = r[k] + K_I × (ρ_crit - ρ_measured)
+- **Separate integrator state**: Maintains commanded flow independent of achieved flow
+- **Anti-windup logic**: Prevents integrator wind-up during saturation
+- **Saturation bounds**: Respects actuator limits, demand arrivals, and available supply
+- **Ramp lane accounting**: Capacity accounts for number of ramp lanes
+
+### Running ALINEA Examples
+
+Run the comprehensive ALINEA demonstration and parameter scan:
+
+```bash
+python Exercise2/run_alinea.py
+```
+
+This script:
+1. Runs scenarios A, B, and C without ALINEA (baseline)
+2. Performs parameter scan to find optimal K_I for scenarios B and C
+3. Runs scenarios with optimal K_I values
+4. Generates density/speed/flow time-series plots
+5. Creates 2D and 3D space-time visualizations
+6. Saves all plots to `Exercise2/outputs/`
+
+Output files follow naming convention:
+- `scenario_{letter}_metanet.png` - Without ALINEA
+- `scenario_{letter}_alinea_metanet.png` - With ALINEA
+
+### Verifying ALINEA Implementation
+
+Run the verification script to confirm ALINEA is working correctly:
+
+```bash
+python Exercise2/verify_alinea.py
+```
+
+This verification script:
+1. **Prints timestep-by-timestep variables**: Shows ρ_measured, r_cmd (commanded flow), q_ramp (achieved flow), queue length, and saturation status
+2. **Checks integrator behavior**: Verifies separate integrator state updates correctly
+3. **Validates anti-windup**: Confirms integrator freezes when saturated
+4. **Compares with/without ALINEA**: Shows impact on VKT, VHT, average speed, and queue lengths
+
+Expected verification output:
+- Integrator state (r_cmd) increases when ρ_measured < ρ_crit
+- Achieved flow (q_ramp) respects all saturation bounds
+- Anti-windup activates when q_ramp < r_cmd
+- ALINEA modifies traffic metrics compared to no-control baseline
+
+### ALINEA Parameters
+
+Key parameters in `metanet_model.py`:
+
+| Parameter | Description | Typical Values |
+|-----------|-------------|----------------|
+| `K_I` | Integral gain [veh/h per veh/km/lane] | 0-20 (tune via scan) |
+| `rho_crit` | Target critical density [veh/km/lane] | ~33 for standard freeways |
+| `measured_cell` | Cell index for density measurement | Downstream of merge (e.g., cell 2 or 4) |
+| `ramp_lanes` | Number of ramp lanes | 1.0 (single lane ramp) |
+| `Q_lane` | Ramp capacity per lane [veh/h] | 2000 |
+
+### Tuning K_I
+
+The optimal K_I depends on:
+- **Sampling time** (T_step): Smaller steps require smaller K_I
+- **Traffic demand**: Higher demand may need stronger control
+- **Measurement location**: Further downstream needs different gains
+- **Performance objective**: Minimize VHT, maximize throughput, etc.
+
+Use `scan_K()` function in `run_alinea.py` to find optimal K_I:
+
+```python
+from run_alinea import scan_K
+import numpy as np
+
+lanes = np.full(6, 3.0)
+K_values, vht_values, avg_speed = scan_K(
+    d_main=4000.0,
+    d_ramp=2500.0,
+    lanes=lanes,
+    measured_cell=2,
+    K_min=0.5,
+    K_max=20.0,
+    n_K=1000
+)
+
+# Find optimal K_I
+idx_opt = np.argmin(vht_values)
+K_opt = K_values[idx_opt]
+print(f"Optimal K_I: {K_opt:.2f} with VHT: {vht_values[idx_opt]:.1f} veh·h")
+```
+
+### Implementation Details
+
+**Integrator Update** (in `metanet_model.py`, lines 103-127):
+```python
+# Separate integrator/command state
+r_prev_cmd = 0.0  # Initialized at start
+
+# At each timestep:
+if K_I > 0.0 and measured_cell is not None:
+    rho_meas = density[measured_cell]
+    # Update commanded flow (integrator)
+    r_cmd = r_prev_cmd + K_I * (rho_crit - rho_meas)
+    r_cmd = max(0.0, r_cmd)
+else:
+    r_cmd = arrivals_ramp
+
+# Apply all saturation bounds
+q_ramp = min(r_cmd, arrivals_ramp, q_ramp_max, q_supply)
+
+# Anti-windup: update integrator only when not saturated
+if K_I > 0.0 and measured_cell is not None:
+    if abs(q_ramp - r_cmd) < 1e-9:
+        r_prev_cmd = r_cmd  # Command achieved, update integrator
+    # else: keep r_prev_cmd unchanged (integrator frozen)
+```
+
+**Key Features**:
+1. `r_prev_cmd` stores integrator state (not achieved flow)
+2. Anti-windup prevents wind-up when bounds are active
+3. Bounds check arrivals, capacity (per lane × lanes), and available supply
+4. Measured density from specified cell provides feedback signal
+
+### Expected Results
+
+**Scenario B** (d_main=4000, d_ramp=2500, uniform 3 lanes):
+- Without ALINEA: VHT ≈ 344 veh·h, avg speed ≈ 41 km/h
+- With ALINEA (K_I≈6): VHT ≈ 355 veh·h, avg speed ≈ 40 km/h
+- ALINEA trades slight VHT increase for improved mainline flow stability
+
+**Scenario C** (d_main=1500, d_ramp=1500, lane drop at cell 3):
+- Without ALINEA: VHT ≈ 577 veh·h, avg speed ≈ 11 km/h (severe congestion)
+- With ALINEA (K_I≈7-8): VHT ≈ 232-538 veh·h (varies with tuning)
+- ALINEA can significantly reduce congestion at bottlenecks
+
+### Troubleshooting
+
+**Issue**: ALINEA increases VHT instead of decreasing it
+- **Cause**: K_I too high (overshooting) or too low (undercontrol)
+- **Solution**: Run parameter scan, adjust measured_cell location
+
+**Issue**: Ramp queue builds up excessively
+- **Cause**: K_I restricting ramp flow too much
+- **Solution**: Lower K_I or verify ρ_crit is appropriate
+
+**Issue**: No visible control action
+- **Cause**: K_I=0, measured_cell=None, or density never exceeds ρ_crit
+- **Solution**: Verify parameters, check demands create congestion
+
+**Issue**: Integrator wind-up suspected
+- **Cause**: Anti-windup not working
+- **Solution**: Run `verify_alinea.py` to check saturation detection
+
 ## Running Examples
 
 ### CTM Examples
@@ -411,6 +568,12 @@ The simulator can be extended for:
 **Missing pandas**: The simulator works without pandas, but `to_dataframe()` requires it. Install with `pip install pandas`.
 
 ## Files
+
+### METANET with ALINEA Files
+- `metanet_model.py` - Core METANET simulation engine with ALINEA ramp metering implementation
+- `run_alinea.py` - Scenario runner with ALINEA parameter scanning and plotting utilities
+- `verify_alinea.py` - ALINEA verification script with timestep logging and comparison
+- `outputs/` - Generated plots and visualizations
 
 ### CTM Files
 - `ctm_simulation.py` - Core CTM implementation

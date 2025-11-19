@@ -18,14 +18,22 @@ def plot_scenario(res, lanes, title_suffix=""):
 
     # Build output filename base: extract scenario letter and detect ALINEA usage.
     title_up = (title_suffix or "").upper()
+    title_low = (title_suffix or "").lower()
     m = re.search(r"SCENARIO\s*([A-Z])", title_up)
     scenario_letter = m.group(1) if m else (
         res.get("scenario", "unknown") if isinstance(res.get("scenario"), str) else "unknown")
-    if "NO" in title_up:
-        mode = ""
-    elif "ALINEA" in title_up or "K_I" in title_up:
-        mode = "alinea"
-    base_name = f"scenario_{scenario_letter.lower()}_{mode}_metanet".replace("__", "_")
+    
+    # Detect ALINEA/K_I while handling negations like "no alinea", "without alinea", etc.
+    has_alinea = bool(re.search(r"\balinea\b|\bk_i\b", title_low))
+    negated = bool(re.search(r"\b(no|not|without)\b\s*(alinea|\bk_i\b)|\b(alinea|\bk_i\b)\s*(no|not|without)\b", title_low))
+    mode = "alinea" if has_alinea and not negated else ""
+    
+    # Build base name and collapse multiple underscores
+    if mode:
+        base_name = f"scenario_{scenario_letter.lower()}_{mode}_metanet"
+    else:
+        base_name = f"scenario_{scenario_letter.lower()}_metanet"
+    base_name = re.sub(r"_+", "_", base_name)
 
     # Ensure outputs directory exists
     out_dir = "outputs"

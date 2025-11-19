@@ -79,7 +79,8 @@ def run_metanet(
 
     queue_ramp = 0.0
     queue_main = 0.0
-    r_prev = 0.0  # previous ramp flow for ALINEA
+    r_prev = 0.0  # previous achieved ramp flow
+    r_prev_cmd = 0.0  # ALINEA integrator/command state
 
     # storing results
     densities = []
@@ -104,16 +105,27 @@ def run_metanet(
         arrivals_ramp = d_ramp + queue_ramp / T_step
         supply_ramp = w_back * (rho_max - density[merge_cell]) * lanes[merge_cell]
         q_supply = max(0.0, supply_ramp)
-        q_ramp_max = Q_lane
+        # Assume single-lane ramp; adjust if ramp has multiple lanes
+        ramp_lanes = 1.0
+        q_ramp_max = Q_lane * ramp_lanes
 
         if K_I > 0.0 and measured_cell is not None:
             rho_meas = density[measured_cell]
-            r_cmd = r_prev + K_I * (rho_crit - rho_meas)
+            # ALINEA integrator update using separate command state
+            r_cmd = r_prev_cmd + K_I * (rho_crit - rho_meas)
             r_cmd = max(0.0, r_cmd)
         else:
             r_cmd = arrivals_ramp
 
+        # Apply actuator/supply bounds
         q_ramp = min(r_cmd, arrivals_ramp, q_ramp_max, q_supply)
+        
+        # Anti-windup: update integrator state only when command is not saturated
+        if K_I > 0.0 and measured_cell is not None:
+            if abs(q_ramp - r_cmd) < 1e-9:
+                r_prev_cmd = r_cmd
+            # else: keep r_prev_cmd unchanged (anti-windup)
+        
         queue_ramp = max(0.0, queue_ramp + T_step * (d_ramp - q_ramp))
 
         # current density
