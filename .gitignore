@@ -430,3 +430,4 @@ octave-workspace
 /Exercise1/outputs/*.mp4
 /opencv/
 /Exercise2/debug
+/Exercise3/data

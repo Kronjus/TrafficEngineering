@@ -50,7 +50,7 @@ def _get_profile_value(profile: Profile, step: int, dt_hours: float) -> float:
       1. Inspect the function signature. If the first positional parameter's
          name matches known time/step names, call the function with the
          corresponding single argument (time in seconds, time in hours, or step).
-      2. Otherwise try calling with keyword arguments ``step``, ``time_hours``,
+      2. Otherwise, try calling with keyword arguments ``step``, ``time_hours``,
          and ``time_seconds`` (some callables accept keyword-only args).
       3. If signature introspection fails or the above attempts raise
          TypeError, fall back to trying to call the callable with a single
