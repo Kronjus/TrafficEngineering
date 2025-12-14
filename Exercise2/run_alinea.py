@@ -171,7 +171,7 @@ if __name__ == "__main__":
     print(f"  VHT = {res_B['vht']:.1f} veh·h")
     print(f"  Avg speed = {res_B['avg_speed']:.1f} km/h")
 
-    res_C = run_metanet(dC_main, dC_ramp, lanes_C, K_I=0.0, measured_cell=None, lane_drop_cell=3)
+    res_C = run_metanet(dC_main, dC_ramp, lanes_C, K_I=0.0, measured_cell=None, lane_drop_cell=4)
     print("Scenario C (no ALINEA)")
     print(f"  VKT = {res_C['vkt']:.1f} veh·km")
     print(f"  VHT = {res_C['vht']:.1f} veh·h")
@@ -181,7 +181,7 @@ if __name__ == "__main__":
     plot_scenario(res_B, lanes_B, title_suffix="– Scenario B, no ALINEA")
     plot_scenario(res_C, lanes_C, title_suffix="– Scenario C, no ALINEA")
 
-    K_B, vht_B, avg_B = scan_K(dB_main, dB_ramp, lanes_B, measured_cell=4)
+    K_B, vht_B, avg_B = scan_K(dB_main, dB_ramp, lanes_B, K_max=50, n_K=10_000, measured_cell=3)
     idx_B = np.argmin(vht_B)
     K_opt_B = K_B[idx_B]
     print(f"Scenario B: K_opt = {K_opt_B:.2f}, VHT_min = {vht_B[idx_B]:.1f} veh·h")
@@ -194,15 +194,15 @@ if __name__ == "__main__":
     plt.grid(True)
     plt.show()
 
-    best_B = run_metanet(dB_main, dB_ramp, lanes_B, K_I=K_opt_B, measured_cell=4, lane_drop_cell=None)
+    best_B = run_metanet(dB_main, dB_ramp, lanes_B, K_I=K_opt_B, measured_cell=3, lane_drop_cell=None)
     print("Scenario B with ALINEA (K_opt)")
     print(f"  VKT = {best_B['vkt']:.1f} veh·km")
     print(f"  VHT = {best_B['vht']:.1f} veh·h")
     print(f"  Avg speed = {best_B['avg_speed']:.1f} km/h")
     plot_scenario(best_B, lanes_B, title_suffix=f"– Scenario B, K_I = {K_opt_B:.2f}")
 
-    K_C, vht_C, avg_C = scan_K(dC_main, dC_ramp, K_min=0.0, K_max=100.0, n_K=10_000, lanes=lanes_C, measured_cell=4,
-                               lane_drop_cell=3)
+    K_C, vht_C, avg_C = scan_K(dC_main, dC_ramp, K_max=50.0, n_K=10_000, lanes=lanes_C, measured_cell=3,
+                               lane_drop_cell=4)
     idx_C = np.argmin(vht_C)
     K_opt_C = K_C[idx_C]
     print(f"Scenario C: K_opt = {K_opt_C:.2f}, VHT_min = {vht_C[idx_C]:.1f} veh·h")
@@ -215,7 +215,7 @@ if __name__ == "__main__":
     plt.grid(True)
     plt.show()
 
-    best_C = run_metanet(dC_main, dC_ramp, lanes_C, K_I=K_opt_C, measured_cell=4, lane_drop_cell=3)
+    best_C = run_metanet(dC_main, dC_ramp, lanes_C, K_I=K_opt_C, measured_cell=3, lane_drop_cell=4)
     print("Scenario C with ALINEA (K_opt)")
     print(f"  VKT = {best_C['vkt']:.1f} veh·km")
     print(f"  VHT = {best_C['vht']:.1f} veh·h")

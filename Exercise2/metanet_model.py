@@ -2,7 +2,10 @@
 # Imports
 ########################################################################
 import math
+
 import numpy as np
+
+
 ########################################################################
 # Creating demands
 ########################################################################
@@ -38,16 +41,18 @@ def create_demands(time, d_main_peak, d_ramp_peak):
     )
 
     return np.stack((mainline, onramp), axis=1)
+
+
 ########################################################################
 # METANET Simulation Loop
 ########################################################################
 def run_metanet(
-    d_main_peak,
-    d_ramp_peak,
-    lanes,
-    K_I=0.0,
-    measured_cell=None,
-    lane_drop_cell=None,
+        d_main_peak,
+        d_ramp_peak,
+        lanes,
+        K_I=0.0,
+        measured_cell=None,
+        lane_drop_cell=None,
 ):
     T_step = 10.0 / 3600.0
     T_final = 5000.0 / 3600.0
@@ -72,15 +77,26 @@ def run_metanet(
     phi = 10.0
     w_back = Q_lane / (rho_max - rho_crit)
 
+    # validate indices for measured_cell and lane_drop_cell
+    if measured_cell is not None:
+        if not (0 <= measured_cell < n_cells):
+            print(f"Warning: measured_cell={measured_cell} out of range, ignoring ALINEA measurement.")
+            measured_cell = None
+    if lane_drop_cell is not None:
+        if not (0 <= lane_drop_cell < n_cells - 1):
+            print(f"Warning: lane_drop_cell={lane_drop_cell} invalid (must be 0..{n_cells - 2}), ignoring lane drop.")
+            lane_drop_cell = None
+
     # initialize state variables
     density = np.zeros(n_cells)
     speed = np.full(n_cells, v_free)
-    flow = np.zeros(n_cells)
 
     queue_ramp = 0.0
     queue_main = 0.0
     r_prev = 0.0  # previous achieved ramp flow
-    r_prev_cmd = 0.0  # ALINEA integrator/command state
+
+    # initialize ALINEA integrator/command state
+    r_prev_cmd = min(Q_lane, d_ramp_peak) if K_I > 0.0 and measured_cell is not None else 0.0
 
     # storing results
     densities = []
@@ -89,57 +105,100 @@ def run_metanet(
     queue_r = []
     queue_m = []
 
+    # ramp geometry (assume single-lane ramp unless specified otherwise)
+    ramp_lanes = 1.0
+    q_ramp_max_const = Q_lane * ramp_lanes
+
     for step, t in enumerate(time):
         d_main = demands[step, 0]
         d_ramp = demands[step, 1]
 
-        flow = density * speed * lanes # current flow
+        # raw flow estimate (density * speed * lanes)
+        flow_est = density * speed * lanes
+
+        # per-cell demand and supply
+        demand = np.minimum(flow_est, Q_lane * lanes)
+        supply = np.maximum(0.0, w_back * (rho_max - density) * lanes)
 
         # mainline origin
         arrivals_main = d_main + queue_main / T_step
-        supply_main = w_back * (rho_max - density[0]) * lanes[0]
-        q_in = min(arrivals_main, Q_lane * lanes[0], max(0.0, supply_main))
+        q_in = min(arrivals_main, Q_lane * lanes[0], supply[0])
         queue_main = max(0.0, queue_main + T_step * (d_main - q_in))
 
-        # ramp with ALINEA
+        # ramp arrivals / ALINEA (integrate using T_step)
         arrivals_ramp = d_ramp + queue_ramp / T_step
-        supply_ramp = w_back * (rho_max - density[merge_cell]) * lanes[merge_cell]
-        q_supply = max(0.0, supply_ramp)
-        # Assume single-lane ramp; adjust if ramp has multiple lanes
-        ramp_lanes = 1.0
-        q_ramp_max = Q_lane * ramp_lanes
-
         if K_I > 0.0 and measured_cell is not None:
             rho_meas = density[measured_cell]
-            # ALINEA integrator update using separate command state
-            r_cmd = r_prev_cmd + K_I * (rho_crit - rho_meas)
-            r_cmd = max(0.0, r_cmd)
+            r_cmd_candidate = r_prev_cmd + K_I * T_step * (rho_crit - rho_meas)
+            r_cmd_candidate = max(0.0, r_cmd_candidate)
         else:
-            r_cmd = arrivals_ramp
+            r_cmd_candidate = arrivals_ramp
 
-        # Apply actuator/supply bounds
-        q_ramp = min(r_cmd, arrivals_ramp, q_ramp_max, q_supply)
-        
-        # Anti-windup: update integrator state only when command is not saturated
+        # actuator / supply bounds for ramp: need q_ramp_max and q_supply at merge cell
+        q_ramp_max = q_ramp_max_const
+        q_supply = supply[merge_cell] if 0 <= merge_cell < n_cells else 0.0
+
+        # desired ramp and applied q_ramp will be decided during merge allocation
+        ramp_desired = r_cmd_candidate
+        ramp_desired = min(ramp_desired, arrivals_ramp, q_ramp_max)
+
+        # compute inter-cell flows f and allocate merge supply
+        if n_cells >= 2:
+            f = np.zeros(n_cells - 1)
+            # normal links (except the upstream link feeding the merge cell)
+            for i in range(n_cells - 1):
+                if i == merge_cell - 1:
+                    # skip merge upstream link here; handle below
+                    continue
+                f[i] = min(demand[i], supply[i + 1])
+
+            # handle merge
+            if 0 < merge_cell < n_cells:
+                main_demand = demand[merge_cell - 1]
+                supply_merge = supply[merge_cell]
+                total_alloc = min(main_demand + ramp_desired, supply_merge)
+                main_flow = min(main_demand, total_alloc)
+                ramp_flow = min(ramp_desired, max(0.0, total_alloc - main_flow))
+                f[merge_cell - 1] = main_flow
+                q_ramp = ramp_flow
+            else:
+                # unreachable or no merge
+                q_ramp = 0.0
+
+            # outflow from last cell (vehicles leaving network)
+            outflow_last = demand[-1]
+        else:
+            # single cell domain: no inter-cell flows
+            f = np.zeros(0)
+            q_ramp = 0.0
+            outflow_last = demand[-1] if n_cells == 1 else 0.0
+
+        # Anti-windup: update integrator to applied q_ramp
         if K_I > 0.0 and measured_cell is not None:
-            if abs(q_ramp - r_cmd) < 1e-9:
-                r_prev_cmd = r_cmd
-            # else: keep r_prev_cmd unchanged (anti-windup)
-        
+            if abs(q_ramp - r_cmd_candidate) < 1e-6:
+                r_prev_cmd = r_cmd_candidate
+            else:
+                r_prev_cmd = q_ramp
+
         queue_ramp = max(0.0, queue_ramp + T_step * (d_ramp - q_ramp))
 
-        # current density
+        # update densities using computed inter-cell flows and ramp contribution
         new_density = density.copy()
         for i in range(n_cells):
             if i == 0:
-                new_density[i] = density[i] + (T_step / (L * lanes[i])) * (q_in - flow[i])
+                f_out = f[0] if n_cells > 1 else outflow_last
+                new_density[i] = density[i] + (T_step / (L * lanes[i])) * (q_in - f_out)
             elif i == merge_cell:
-                new_density[i] = density[i] + (T_step / (L * lanes[i])) * (flow[i - 1] + q_ramp - flow[i])
+                f_in = f[i - 1] if i - 1 >= 0 else 0.0
+                f_out = f[i] if i < n_cells - 1 else outflow_last
+                new_density[i] = density[i] + (T_step / (L * lanes[i])) * (f_in + q_ramp - f_out)
             else:
-                new_density[i] = density[i] + (T_step / (L * lanes[i])) * (flow[i - 1] - flow[i])
+                f_in = f[i - 1] if i - 1 >= 0 else 0.0
+                f_out = f[i] if i < n_cells - 1 else outflow_last
+                new_density[i] = density[i] + (T_step / (L * lanes[i])) * (f_in - f_out)
             new_density[i] = min(rho_max, max(0.0, new_density[i]))
 
-        # current speed
+        # update speeds (unchanged logic)
         new_speed = speed.copy()
         for i in range(n_cells):
             rho_i = density[i]
@@ -166,11 +225,12 @@ def run_metanet(
 
             if lane_drop_cell is not None and i == lane_drop_cell:
                 delta_lambda = lanes[i] - lanes[i + 1]
-                lane_drop_term = (
-                        phi * T_step * delta_lambda * rho_i * speed[i] ** 2
-                        / (L * lanes[i] * rho_crit)
-                )
-                new_speed[i] -= lane_drop_term
+                if delta_lambda > 0:
+                    lane_drop_term = (
+                            phi * T_step * delta_lambda * rho_i * speed[i] ** 2
+                            / (L * lanes[i] * rho_crit)
+                    )
+                    new_speed[i] -= lane_drop_term
 
             new_speed[i] = min(v_free, max(0.0, new_speed[i]))
 
@@ -179,10 +239,16 @@ def run_metanet(
         speed = new_speed
         r_prev = q_ramp
 
+        # Build applied outflow per cell (outflow from each cell)
+        applied_flow = np.zeros(n_cells)
+        if n_cells > 1:
+            applied_flow[: n_cells - 1] = f.copy()
+        applied_flow[-1] = outflow_last
+
         # store results
         densities.append(density.copy())
         speeds.append(speed.copy())
-        flows.append(flow.copy())
+        flows.append(applied_flow.copy())
         queue_r.append(queue_ramp)
         queue_m.append(queue_main)
 
@@ -196,7 +262,7 @@ def run_metanet(
     vht_main = np.sum(densities * lanes * L * T_step)
     vht_queue = np.sum(queue_r * T_step) + np.sum(queue_m * T_step)
     vht = vht_main + vht_queue
-    avg_speed = vkt / vht
+    avg_speed = vkt / vht if vht > 0 else 0.0
 
     return {
         "time": time,
